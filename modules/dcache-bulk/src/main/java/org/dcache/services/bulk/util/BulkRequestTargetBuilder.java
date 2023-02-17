@@ -60,6 +60,7 @@ documents or software obtained from this server.
 package org.dcache.services.bulk.util;
 
 import diskCacheV111.util.FsPath;
+import org.dcache.services.bulk.util.BulkRequestTarget.PID;
 import org.dcache.services.bulk.util.BulkRequestTarget.State;
 import org.dcache.vehicles.FileAttributes;
 
@@ -74,18 +75,23 @@ public final class BulkRequestTargetBuilder {
         return new BulkRequestTargetBuilder();
     }
 
-    public BulkRequestTargetBuilder id(long id) {
+    public BulkRequestTargetBuilder id(Long id) {
         target.setId(id);
         return this;
     }
 
-    public BulkRequestTargetBuilder pid(Long pid) {
+    public BulkRequestTargetBuilder pid(PID pid) {
         target.setPid(pid);
         return this;
     }
 
-    public BulkRequestTargetBuilder rid(String rid) {
+    public BulkRequestTargetBuilder rid(Long rid) {
         target.setRid(rid);
+        return this;
+    }
+
+    public BulkRequestTargetBuilder ruid(String ruid) {
+        target.setRuid(ruid);
         return this;
     }
 

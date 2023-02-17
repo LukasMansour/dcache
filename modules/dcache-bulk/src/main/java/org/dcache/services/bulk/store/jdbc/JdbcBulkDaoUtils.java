@@ -86,6 +86,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Required;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.ParameterizedPreparedStatementSetter;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.support.JdbcDaoSupport;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
@@ -98,6 +99,9 @@ import org.springframework.jdbc.support.rowset.SqlRowSet;
 public final class JdbcBulkDaoUtils {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(JdbcBulkDaoUtils.class);
+
+    private static final String SELECT_COUNTS_BY_STATE =
+          "SELECT * FROM counts_by_state";
 
     public static <T> Set<T> toSetOrNull(T[] array) {
         return array == null ? null : Arrays.stream(array).collect(Collectors.toSet());
@@ -115,6 +119,16 @@ public final class JdbcBulkDaoUtils {
         LOGGER.trace("count {} ({}).", sql, criterion.getArguments());
         return support.getJdbcTemplate()
               .queryForObject(sql, criterion.getArgumentsAsArray(), Integer.class);
+    }
+
+    public Map<String, Long> countsByState(JdbcDaoSupport support) {
+        LOGGER.trace("countStates.");
+        SqlRowSet rowSet = support.getJdbcTemplate().queryForRowSet(SELECT_COUNTS_BY_STATE);
+        Map<String, Long> counts = new HashMap<>();
+        while (rowSet.next()) {
+            counts.put(rowSet.getString(1), rowSet.getLong(2));
+        }
+        return counts;
     }
 
     public Map<String, Long> countGrouped(JdbcCriterion criterion, String tableName,
@@ -141,10 +155,20 @@ public final class JdbcBulkDaoUtils {
         return support.getJdbcTemplate().update(sql, criterion.getArgumentsAsArray());
     }
 
+    public int delete(JdbcCriterion criterion, String tableName, String secondaryTable,
+          JdbcDaoSupport support) {
+        LOGGER.trace("delete {}.", criterion);
+        String sql =
+              "DELETE FROM " + tableName + " WHERE EXISTS (SELECT * FROM " + secondaryTable
+                    + " WHERE " + criterion.getPredicate() + ")";
+        LOGGER.trace("delete {} ({}).", sql, criterion.getArguments());
+        return support.getJdbcTemplate().update(sql, criterion.getArgumentsAsArray());
+    }
+
     /**
      * @throws SQLException in order to support the jdbc template API.
      */
-    public Object deserializeFromBase64(String request, String field, String base64)
+    public Object deserializeFromBase64(Long id, String field, String base64)
           throws SQLException {
         if (base64 == null) {
             return null;
@@ -155,17 +179,16 @@ public final class JdbcBulkDaoUtils {
             return istream.readObject();
         } catch (IOException | ClassNotFoundException e) {
             throw new SQLException("problem deserializing " + field + " for "
-                  + request, e);
+                  + id, e);
         }
     }
 
-    public <T> List<T> get(JdbcCriterion criterion, int limit, String tableName,
+    public <T> List<T> get(String select, JdbcCriterion criterion, int limit, String tableName,
           JdbcDaoSupport support, RowMapper<T> mapper) {
-        LOGGER.trace("get {}, limit {}.", criterion, limit);
-
+        LOGGER.trace("get {}, {}, limit {}.", select, criterion, limit);
         Boolean reverse = criterion.reverse();
         String direction = reverse == null || !reverse ? "ASC" : "DESC";
-        String sql = "SELECT * FROM " + tableName + " WHERE " + criterion.getPredicate()
+        String sql = select + " FROM " + tableName + " WHERE " + criterion.getPredicate()
               + " ORDER BY " + criterion.orderBy() + " " + direction + " LIMIT " + limit;
 
         LOGGER.trace("get {} ({}).", sql, criterion.getArguments());
@@ -175,43 +198,28 @@ public final class JdbcBulkDaoUtils {
         return template.query(sql, criterion.getArgumentsAsArray(), mapper);
     }
 
+    public <T> List<T> get(JdbcCriterion criterion, int limit, String tableName,
+          JdbcDaoSupport support, RowMapper<T> mapper) {
+        return get("SELECT *", criterion, limit, tableName, support, mapper);
+    }
+
     public <T> List<T> get(String sql, List args, int limit, JdbcDaoSupport support,
           RowMapper<T> mapper) {
         LOGGER.trace("get {}, {}, limit {}.", sql, args, limit);
         JdbcTemplate template = support.getJdbcTemplate();
         template.setFetchSize(fetchSize);
-        args.add(limit);
-        return template.query(sql, args.toArray(Object[]::new), mapper);
+        return template.query(sql + " LIMIT " + limit, args.toArray(Object[]::new), mapper);
     }
 
     public Optional<KeyHolder> insert(JdbcUpdate update, String tableName, JdbcDaoSupport support) {
         LOGGER.trace("insert {}.", update);
-
         String sql = "INSERT INTO " + tableName + " " + update.getInsert();
+        return insert(sql, update.getArguments(), support);
+    }
 
-        KeyHolder keyHolder = new GeneratedKeyHolder();
-
-        try {
-            support.getJdbcTemplate().update(
-                  con -> {
-                      PreparedStatement ps = con.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
-                      Collection<Object> arguments = update.getArguments();
-
-                      int i = 1;
-                      for (Object argument : arguments) {
-                          ps.setObject(i++, argument);
-                      }
-
-                      LOGGER.trace("insert {}.", ps);
-                      return ps;
-                  }, keyHolder);
-        } catch (DuplicateKeyException e) {
-            LOGGER.trace("insert {}, {}.", update, e.toString());
-            return Optional.empty();
-        }
-
-        LOGGER.trace("insert {}, succeeded.", update);
-        return Optional.of(keyHolder);
+    public <T> void insertBatch(List<T> targets, String sql,
+          ParameterizedPreparedStatementSetter<T> setter, JdbcDaoSupport support) {
+        support.getJdbcTemplate().batchUpdate(sql, targets, 100, setter);
     }
 
     public String serializeToBase64(String field, Serializable serializable)
@@ -236,8 +244,48 @@ public final class JdbcBulkDaoUtils {
         LOGGER.trace("update {} : {}.", criterion, update);
         String sql = "UPDATE " + tableName + " SET " + update.getUpdate() + " WHERE "
               + criterion.getPredicate();
-        LOGGER.trace("update {} ({}, {}).", sql, update.getArguments(), criterion.getArguments());
+        LOGGER.trace("update {} ({}, {}).", sql, update.getArguments(),
+              criterion.getArguments());
         return support.getJdbcTemplate().update(sql,
               concatArguments(update.getArguments(), criterion.getArguments()));
+    }
+
+    public int update(JdbcCriterion criterion, JdbcUpdate update, String tableName,
+          String secondaryTable, JdbcDaoSupport support) {
+        LOGGER.trace("update {} : {}.", criterion, update);
+        String sql =
+              "UPDATE " + tableName + " SET " + update.getUpdate() + " FROM " + secondaryTable
+                    + " WHERE " + criterion.getPredicate();
+        LOGGER.trace("update {} ({}, {}).", sql, update.getArguments(),
+              criterion.getArguments());
+        return support.getJdbcTemplate().update(sql,
+              concatArguments(update.getArguments(), criterion.getArguments()));
+    }
+
+    public Optional<KeyHolder> insert(String sql, Collection<Object> arguments,
+          JdbcDaoSupport support) {
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+
+        try {
+            support.getJdbcTemplate().update(
+                  con -> {
+                      PreparedStatement ps = con.prepareStatement(sql,
+                            Statement.RETURN_GENERATED_KEYS);
+
+                      int i = 1;
+                      for (Object argument : arguments) {
+                          ps.setObject(i++, argument);
+                      }
+
+                      LOGGER.trace("insert {}.", ps);
+                      return ps;
+                  }, keyHolder);
+        } catch (DuplicateKeyException e) {
+            LOGGER.trace("insert {}, {}.", arguments, e.toString());
+            return Optional.empty();
+        }
+
+        LOGGER.trace("insert {}, succeeded.", arguments);
+        return Optional.of(keyHolder);
     }
 }

@@ -24,6 +24,7 @@ import static org.dcache.namespace.FileAttribute.MODIFICATION_TIME;
 import static org.dcache.namespace.FileAttribute.SIZE;
 import static org.dcache.namespace.FileAttribute.STORAGEINFO;
 import static org.dcache.namespace.FileAttribute.TYPE;
+import static org.dcache.util.NetworkUtils.getProtocolFamily;
 import static org.dcache.util.TransferRetryPolicy.tryOnce;
 import static org.dcache.xrootd.plugins.tls.SSLHandlerFactory.CLIENT_TLS;
 import static org.dcache.xrootd.plugins.tls.SSLHandlerFactory.SERVER_TLS;
@@ -69,6 +70,8 @@ import java.io.PrintWriter;
 import java.io.Serializable;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.ProtocolFamily;
+import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -93,6 +96,8 @@ import javax.security.auth.Subject;
 import org.dcache.acl.enums.AccessType;
 import org.dcache.auth.Origin;
 import org.dcache.auth.Subjects;
+import org.dcache.auth.UnionLoginStrategy;
+import org.dcache.auth.UnionLoginStrategy.AccessLevel;
 import org.dcache.auth.attributes.Activity;
 import org.dcache.auth.attributes.Restriction;
 import org.dcache.cells.CellStub;
@@ -218,6 +223,8 @@ public class XrootdDoor
     private NettyPortRange portRange;
     private int proxyResponseTimeoutInSeconds;
     private InetAddress _internalAddress;
+
+    private UnionLoginStrategy.AccessLevel anonymousUserAccess = AccessLevel.NONE;
 
     @Autowired(required = false)
     private void setKafkaTemplate(
@@ -422,6 +429,15 @@ public class XrootdDoor
               TimeUnit.MILLISECONDS);
     }
 
+    @Required
+    public void setAnonymousAccess(AccessLevel level) {
+        anonymousUserAccess = level;
+    }
+
+    public AccessLevel getAnonymousUserAccess() {
+        return anonymousUserAccess;
+    }
+
     public boolean isTriedHostsEnabled() {
         return triedHostsEnabled;
     }
@@ -439,9 +455,12 @@ public class XrootdDoor
     public Optional<InetSocketAddress> publicEndpoint() {
         return _loginBrokerInfo.flatMap(i -> {
             List<InetAddress> addresses = i.getAddresses();
-            return addresses.isEmpty()
-                  ? Optional.empty()
-                  : Optional.of(new InetSocketAddress(addresses.get(0), i.getPort()));
+            for (InetAddress addr : addresses) {
+                if (!addr.isLinkLocalAddress() && !addr.isLoopbackAddress()) {
+                    return Optional.of(new InetSocketAddress(addr, i.getPort()));
+                }
+            }
+            return Optional.empty();
         });
     }
 
@@ -449,7 +468,7 @@ public class XrootdDoor
     createTransfer(InetSocketAddress client, FsPath path, Set<String> tried,
           String ioQueue, UUID uuid, InetSocketAddress local, Subject subject,
           Restriction restriction,
-          Map<String, String> opaque) throws ParseException {
+          Map<String, String> opaque) throws ParseException, SocketException {
         XrootdTransfer transfer =
               new XrootdTransfer(_pnfs, subject, restriction, path, opaque) {
                   @Override
@@ -477,8 +496,10 @@ public class XrootdDoor
         transfer.setBillingStub(_billingStub);
         transfer.setClientAddress(client);
         transfer.setUUID(uuid);
-        transfer.setDoorAddress(local);
-        transfer.setInternalAddress(new InetSocketAddress(_internalAddress, 0));
+        transfer.setDoorAddress(getMatchingLocalAddress(local));
+        if (_internalAddress != null) {
+            transfer.setInternalAddress(new InetSocketAddress(_internalAddress, 0));
+        }
         transfer.setIoQueue(ioQueue == null ? _ioQueue : ioQueue);
         transfer.setFileHandle(_handleCounter.getAndIncrement());
         transfer.setKafkaSender(_kafkaSender);
@@ -487,11 +508,28 @@ public class XrootdDoor
         return transfer;
     }
 
+    private InetSocketAddress getMatchingLocalAddress(InetSocketAddress local)
+          throws SocketException {
+        _log.info("current local address for {} door: {}.", proxied ? "proxied" : "regular", local);
+
+        if (!proxied) {
+            return local;
+        }
+
+        /* _internalAddress should not be <code>null</code> */
+
+        ProtocolFamily internalFamily = getProtocolFamily(_internalAddress);
+        InetAddress matching = NetworkUtils.getLocalAddress(_internalAddress, internalFamily);
+        local = new InetSocketAddress(matching, local.getPort());
+        _log.info("matching local address for proxied door: {}.", local);
+        return local;
+    }
+
     public XrootdTransfer
     read(InetSocketAddress client, FsPath path, Set<String> tried,
           String ioQueue, UUID uuid, InetSocketAddress local,
           Subject subject, Restriction restriction, Map<String, String> opaque)
-          throws CacheException, InterruptedException, ParseException {
+          throws CacheException, InterruptedException, ParseException, SocketException {
         if (!isReadAllowed(path)) {
             throw new PermissionDeniedCacheException("Read permission denied");
         }
@@ -565,7 +603,7 @@ public class XrootdDoor
           InetSocketAddress local, Subject subject, Restriction restriction,
           boolean persistOnSuccessfulClose, FsPath rootPath,
           Serializable delegatedProxy, Map<String, String> opaque)
-          throws CacheException, InterruptedException, ParseException {
+          throws CacheException, InterruptedException, ParseException, SocketException {
 
         if (!isWriteAllowed(path)) {
             throw new PermissionDeniedCacheException("Write permission denied");
@@ -1190,7 +1228,7 @@ public class XrootdDoor
         factory = SSLHandlerFactory.getHandlerFactory(CLIENT_TLS, sslHandlerFactories);
         tlsSessionInfo.setClientSslHandlerFactory(factory);
         NettyXrootProxyAdapter adapter = new NettyXrootProxyAdapter(acceptGroup, socketGroup,
-              clientGroup, portRange, InetAddress.getLocalHost(), poolAddress, tlsSessionInfo,
+              clientGroup, portRange, poolAddress, tlsSessionInfo,
               proxyResponseTimeoutInSeconds, proxyTimerExecutor);
         return adapter;
     }

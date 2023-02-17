@@ -59,22 +59,30 @@ documents or software obtained from this server.
  */
 package org.dcache.services.bulk.store.jdbc.rtarget;
 
+import static java.util.stream.Collectors.joining;
 import static org.dcache.services.bulk.util.BulkRequestTarget.State.FAILED;
 import static org.dcache.services.bulk.util.BulkRequestTarget.State.RUNNING;
+import static org.dcache.util.Strings.truncate;
 
-import com.google.common.base.Strings;
 import com.google.common.base.Throwables;
 import diskCacheV111.util.FsPath;
 import diskCacheV111.util.PnfsId;
 import java.sql.Timestamp;
 import org.dcache.db.JdbcUpdate;
 import org.dcache.namespace.FileType;
+import org.dcache.services.bulk.util.BulkRequestTarget.PID;
 import org.dcache.services.bulk.util.BulkRequestTarget.State;
 
 /**
  * Implementation of the update class for the request target table.
  */
 public final class JdbcRequestTargetUpdate extends JdbcUpdate {
+
+    public String getUpdate() {
+        return updates.keySet().stream()
+              .map(s -> s + " = ?")
+              .collect(joining(","));
+    }
 
     public JdbcRequestTargetUpdate state(State state) {
         if (state != null) {
@@ -86,6 +94,10 @@ public final class JdbcRequestTargetUpdate extends JdbcUpdate {
             }
         }
         return this;
+    }
+
+    public String getStateName() {
+        return (String)updates().get("state");
     }
 
     public JdbcRequestTargetUpdate createdAt(long createdAt) {
@@ -114,20 +126,18 @@ public final class JdbcRequestTargetUpdate extends JdbcUpdate {
         if (errorObject != null) {
             Throwable root = Throwables.getRootCause(errorObject);
             set("error_type", root.getClass().getCanonicalName());
-            set("error_message", root.getMessage());
+            set("error_message", truncate(root.getMessage(), 256, false));
         }
         return this;
     }
 
-    public JdbcRequestTargetUpdate pid(Long pid) {
-        if (pid != null) {
-            set("pid", pid);
-        }
+    public JdbcRequestTargetUpdate pid(PID pid) {
+        set("pid", pid == null ? PID.INITIAL.ordinal() : pid.ordinal());
         return this;
     }
 
-    public JdbcRequestTargetUpdate rid(String rid) {
-        if (Strings.emptyToNull(rid) != null) {
+    public JdbcRequestTargetUpdate rid(Long rid) {
+        if (rid != null) {
             set("rid", rid);
         }
         return this;
@@ -144,7 +154,7 @@ public final class JdbcRequestTargetUpdate extends JdbcUpdate {
 
     public JdbcRequestTargetUpdate path(FsPath path) {
         if (path != null) {
-            set("path", path.toString());
+            set("path", truncate(path.toString(), 256,true));
         }
         return this;
     }
@@ -154,13 +164,6 @@ public final class JdbcRequestTargetUpdate extends JdbcUpdate {
             set("type", type.name());
         } else {
             set("type", "?");
-        }
-        return this;
-    }
-
-    public JdbcRequestTargetUpdate activity(String activity) {
-        if (Strings.emptyToNull(activity) != null) {
-            set("activity", activity);
         }
         return this;
     }

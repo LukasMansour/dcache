@@ -75,15 +75,41 @@ public final class JdbcBulkRequestCriterion extends JdbcCriterion {
         sorter = "arrived_at";
     }
 
-    public JdbcBulkRequestCriterion seqNo(Long seqNo) {
-        if (seqNo != null) {
-            addClause("seq_no >= ?", seqNo);
+    public JdbcBulkRequestCriterion joinOnTarget() {
+        addJoin("bulk_request.id = request_target.rid");
+        return this;
+    }
+
+    public JdbcBulkRequestCriterion joinOnPermissions() {
+        addJoin("bulk_request.id = request_permissions.id");
+        return this;
+    }
+
+    public JdbcBulkRequestCriterion id(Long id) {
+        if (id != null) {
+            addClause("bulk_request.id >= ?", id);
         }
         return this;
     }
 
-    public JdbcBulkRequestCriterion requestIds(String... ids) {
-        addOrClause("id = ?", (Object[]) ids);
+    public JdbcBulkRequestCriterion pnfsId(String pnfsid) {
+        if (pnfsid != null) {
+            addClause("request_target.pnfsid = ?", pnfsid);
+            joinOnTarget();
+        }
+        return this;
+    }
+
+    public JdbcBulkRequestCriterion permId(String uid) {
+        if (uid != null) {
+            addClause("bulk_request.uid = ?", uid);
+            joinOnPermissions();
+        }
+        return this;
+    }
+
+    public JdbcBulkRequestCriterion uids(String... uids) {
+        addOrClause("uid = ?", (Object[]) uids);
         return this;
     }
 
@@ -93,7 +119,7 @@ public final class JdbcBulkRequestCriterion extends JdbcCriterion {
     }
 
     public JdbcBulkRequestCriterion activity(String... activity) {
-        addOrClause("activity = ?", (Object[]) activity);
+        addOrClause("bulk_request.activity = ?", (Object[]) activity);
         return this;
     }
 
@@ -217,7 +243,7 @@ public final class JdbcBulkRequestCriterion extends JdbcCriterion {
 
     public JdbcBulkRequestCriterion filter(BulkRequestFilter filter) {
         if (filter != null) {
-            seqNo(filter.getSeqNo());
+            id(filter.getId());
             arrivedBefore(filter.getBefore());
             arrivedAfter(filter.getAfter());
             cancelOnFailure(filter.getCancelOnFailure());
@@ -228,7 +254,7 @@ public final class JdbcBulkRequestCriterion extends JdbcCriterion {
             expandDirectories(filter.getExpandDirectories());
             activity(filter.getActivity());
             status(filter.getStatuses());
-            requestIds(filter.getId());
+            uids(filter.getUuids());
             user(filter.getOwner());
         }
         return this;

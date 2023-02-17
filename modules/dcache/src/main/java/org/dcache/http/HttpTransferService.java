@@ -1,6 +1,6 @@
 /* dCache - http://www.dcache.org/
  *
- * Copyright (C) 2013-2015 Deutsches Elektronen-Synchrotron
+ * Copyright (C) 2013-2023 Deutsches Elektronen-Synchrotron
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -153,7 +153,14 @@ public class HttpTransferService extends NettyTransferService<HttpProtocolInfo> 
         addChannelHandlers(ch.pipeline());
     }
 
-    protected void addChannelHandlers(ChannelPipeline pipeline) {
+    /**
+     * Indicates whatever under laying socket setup supports in-kernel zero-copy
+     */
+    protected boolean canZeroCopy() {
+        return true;
+    }
+
+    protected void addChannelHandlers(ChannelPipeline pipeline) throws Exception {
         // construct HttpRequestDecoder as netty defaults, except configurable chunk size
         pipeline.addLast("decoder", new HttpRequestDecoder(4096, 8192, getChunkSize(), true));
         pipeline.addLast("encoder", new HttpResponseEncoder());
@@ -175,6 +182,6 @@ public class HttpTransferService extends NettyTransferService<HttpProtocolInfo> 
 
         pipeline.addLast("cors", new CorsHandler(corsConfigBuilder().build()));
 
-        pipeline.addLast("transfer", new HttpPoolRequestHandler(this, chunkSize));
+        pipeline.addLast("transfer", new HttpPoolRequestHandler(this, chunkSize, canZeroCopy()));
     }
 }

@@ -78,6 +78,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.dcache.pinmanager.PinManagerPinMessage;
+import org.dcache.services.bulk.BulkServiceException;
 import org.dcache.services.bulk.util.BulkRequestTarget;
 import org.dcache.vehicles.FileAttributes;
 import org.json.JSONObject;
@@ -99,7 +100,12 @@ public final class StageActivity extends PinManagerActivity {
 
     public void cancel(BulkRequestTarget target) {
         super.cancel(target);
-        pinManager.send(unpinMessage(id, target));
+        try {
+            pinManager.send(unpinMessage(id, target));
+        } catch (CacheException e) {
+            target.setErrorObject(new BulkServiceException("unable to fetch pnfsid of target in "
+                  + "order to cancel staging.", e));
+        }
     }
 
     @Override
@@ -127,8 +133,14 @@ public final class StageActivity extends PinManagerActivity {
     @Override
     protected void configure(Map<String, String> arguments) {
         if (arguments != null) {
-            jsonLifetimes = new JSONObject(arguments.get("diskLifetime"));
-            jsonMetadata = new JSONObject(arguments.get("targetedMetadata"));
+            String value = arguments.get("diskLifetime");
+            if (value != null) {
+                jsonLifetimes = new JSONObject(value);
+            }
+            value = arguments.get("targetedMetadata");
+            if (value != null) {
+                jsonMetadata = new JSONObject(value);
+            }
         }
     }
 

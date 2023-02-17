@@ -79,7 +79,9 @@ import org.dcache.services.bulk.BulkStorageException;
 import org.dcache.services.bulk.activity.BulkActivity;
 import org.dcache.services.bulk.util.BatchedResult;
 import org.dcache.services.bulk.util.BulkRequestTarget;
+import org.dcache.services.bulk.util.BulkRequestTarget.PID;
 import org.dcache.services.bulk.util.BulkRequestTarget.State;
+import org.dcache.services.bulk.util.BulkServiceStatistics;
 import org.dcache.vehicles.FileAttributes;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -95,8 +97,12 @@ public final class RequestContainerJob extends AbstractRequestContainerJob {
     static class DirTarget {
         final FsPath path;
         final FileAttributes attributes;
+        final PID pid;
+        final Long id;
 
-        DirTarget(FsPath path, FileAttributes attributes) {
+        DirTarget(Long id, PID pid, FsPath path, FileAttributes attributes) {
+            this.id = id;
+            this.pid = pid;
             this.attributes = attributes;
             this.path = path;
         }
@@ -105,24 +111,35 @@ public final class RequestContainerJob extends AbstractRequestContainerJob {
     private final Queue<DirTarget> dirs;
 
     public RequestContainerJob(BulkActivity activity, BulkRequestTarget target,
-          BulkRequest request) {
-        super(activity, target, request);
+          BulkRequest request, BulkServiceStatistics statistics) {
+        super(activity, target, request, statistics);
         dirs = new ConcurrentLinkedQueue<>();
     }
 
     @Override
     protected void processFileTargets() throws InterruptedException {
-        List<String> requestTargets = request.getTarget();
+        List<BulkRequestTarget> requestTargets = getInitialTargets();
 
-        for (String tgt : requestTargets) {
+        if (requestTargets.isEmpty()) {
+            containerState = ContainerState.STOP;
+            update(FAILED);
+            return;
+        }
+
+        for (BulkRequestTarget tgt : requestTargets) {
             checkForRequestCancellation();
-            FsPath path = computeFsPath(targetPrefix, tgt);
+            Long id = tgt.getId();
+            FsPath path = tgt.getPath();
+            if (targetPrefix != null && !path.contains(targetPrefix)) {
+                path = computeFsPath(targetPrefix, tgt.getPath().toString());
+            }
+
             switch (depth) {
                 case NONE:
-                    perform(path, null);
+                    perform(id, PID.INITIAL, path, null);
                     break;
                 default:
-                    handleTarget(path);
+                    handleTarget(id, PID.INITIAL, path);
             }
         }
     }
@@ -131,31 +148,34 @@ public final class RequestContainerJob extends AbstractRequestContainerJob {
     protected void processDirTargets() throws InterruptedException {
         for (DirTarget dirTarget : dirs) {
             checkForRequestCancellation();
-            perform(dirTarget.path, dirTarget.attributes);
+            perform(dirTarget.id, dirTarget.pid, dirTarget.path, dirTarget.attributes);
         }
     }
 
     @Override
-    protected void handleDirTarget(FsPath path, FileAttributes attributes) {
-        dirs.add(new DirTarget(path, attributes));
+    protected void handleDirTarget(Long id, PID pid, FsPath path, FileAttributes attributes) {
+        dirs.add(new DirTarget(id, pid, path, attributes));
     }
 
     @Override
-    protected void handleFileTarget(FsPath path, FileAttributes attributes)
+    protected void handleFileTarget(PID pid, FsPath path, FileAttributes attributes)
           throws InterruptedException {
-        perform(path, attributes);
+        perform(null, pid, path, attributes);
     }
 
     @Override
     protected void retryFailed(BatchedResult result, FileAttributes attributes)
           throws BulkStorageException {
         BulkRequestTarget completedTarget = result.getTarget();
+        Long id = completedTarget.getId();
         FsPath path = completedTarget.getPath();
+        PID pid = completedTarget.getPid();
         completedTarget.resetToReady();
+        statistics.decrement(completedTarget.getState().name());
         try {
-            perform(path, attributes);
+            perform(id, pid, path, attributes);
         } catch (InterruptedException e) {
-            LOGGER.debug("{}. retryFailed interrupted", rid);
+            LOGGER.debug("{}. retryFailed interrupted", ruid);
             targetStore.update(result.getTarget().getId(), FAILED, e);
         }
     }
@@ -165,6 +185,7 @@ public final class RequestContainerJob extends AbstractRequestContainerJob {
 
         BulkRequestTarget completedTarget = result.getTarget();
         State state = completedTarget.getState();
+        statistics.decrement(RUNNING.name());
 
         try {
             if (state == FAILED && activity.getRetryPolicy().shouldRetry(completedTarget)) {
@@ -174,7 +195,7 @@ public final class RequestContainerJob extends AbstractRequestContainerJob {
 
             targetStore.update(completedTarget.getId(), state, completedTarget.getThrowable());
         } catch (BulkStorageException e) {
-            LOGGER.error("{} could not store target from result: {}, {}: {}.", rid, result,
+            LOGGER.error("{} could not store target from result: {}, {}: {}.", ruid, result,
                   attributes, e.toString());
         }
 
@@ -185,70 +206,73 @@ public final class RequestContainerJob extends AbstractRequestContainerJob {
         }
     }
 
-    private void handleTarget(FsPath path) throws InterruptedException {
+    private void handleTarget(Long id, PID pid, FsPath path) throws InterruptedException {
         checkForRequestCancellation();
         FileAttributes attributes = null;
-        LOGGER.debug("handleTarget {}, path {}.", rid, path);
+        LOGGER.debug("handleTarget {}, path {}.", ruid, path);
         try {
             attributes = pnfsHandler.getFileAttributes(path, MINIMALLY_REQUIRED_ATTRIBUTES);
             if (attributes.getFileType() == FileType.DIR) {
-                expandDepthFirst(path, attributes);
+                expandDepthFirst(id, pid, path, attributes);
             } else if (attributes.getFileType() != FileType.SPECIAL) {
-                perform(path, attributes);
+                perform(id, pid, path, attributes);
             }
-        } catch (CacheException e) {
-            LOGGER.error("handleTarget {}, path {}, error {}.", rid, path, e.getMessage());
-            register(path, Futures.immediateFailedFuture(e), attributes, e);
+        } catch (BulkServiceException | CacheException e) {
+            LOGGER.error("handleTarget {}, path {}, error {}.", ruid, path, e.getMessage());
+            register(id, pid, path, Futures.immediateFailedFuture(e), attributes, e);
         }
     }
 
-    private ListenableFuture perform(FsPath path, FileAttributes attributes)
+    private ListenableFuture perform(Long id, PID pid, FsPath path, FileAttributes attributes)
           throws InterruptedException {
         checkForRequestCancellation();
 
-        if (hasBeenCancelled(path, attributes)) {
+        if (hasBeenCancelled(id, pid, path, attributes)) {
             return Futures.immediateCancelledFuture();
-        }
-
-        if (targetStore.exists(rid, path)) {
-            LOGGER.debug("{}, {} has already had {} performed on it; skipping.", rid, path,
-                  activity.getName());
-            return Futures.immediateFuture(null);
         }
 
         semaphore.acquire();
 
         ListenableFuture future;
         try {
-            future = activity.perform(rid, id.getAndIncrement(), path, attributes);
+            future = activity.perform(ruid, id == null ? this.id.getAndIncrement() : id, path,
+                  attributes);
         } catch (BulkServiceException | UnsupportedOperationException e) {
-            LOGGER.error("{}, perform failed for {}: {}", rid, path, e.toString());
+            LOGGER.error("{}, perform failed for {}: {}", ruid, path, e.getMessage());
             future = Futures.immediateFailedFuture(e);
-            register(path, future, attributes, e);
+            register(id, pid, path, future, attributes, e);
             return future;
         }
 
-        register(path, future, attributes, null);
+        register(id, pid, path, future, attributes, null);
         return future;
     }
 
-    private void register(FsPath path, ListenableFuture future, FileAttributes attributes,
+    private void register(Long id, PID pid, FsPath path, ListenableFuture future, FileAttributes attributes,
           Throwable error) throws InterruptedException {
         checkForRequestCancellation();
 
-        if (hasBeenCancelled(path, attributes)) {
+        if (hasBeenCancelled(id, pid, path, attributes)) {
             return;
         }
 
-        BulkRequestTarget target = toTarget(path, Optional.ofNullable(attributes),
+        BulkRequestTarget target = toTarget(id, pid, path, Optional.ofNullable(attributes),
               error == null ? RUNNING : FAILED, error);
+
         BatchedResult result = new BatchedResult(target, future);
 
-        try {
-            targetStore.store(target);
-        } catch (BulkStorageException e) {
-            LOGGER.error("{}, could not store target from result {}, {}, {}: {}.", rid, result,
-                  attributes, e.toString());
+        if (error == null) {
+            try {
+                /*
+                 *  If this is an insert (id == null), the target id will be updated to what is
+                 *  returned from the database.
+                 */
+                targetStore.storeOrUpdate(target);
+                statistics.increment(RUNNING.name());
+            } catch (BulkStorageException e) {
+                LOGGER.error("{}, could not store target from result {}, {}, {}: {}.", ruid, result,
+                      attributes, e.toString());
+            }
         }
 
         synchronized (waiting) {

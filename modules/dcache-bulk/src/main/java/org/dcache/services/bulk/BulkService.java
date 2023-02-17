@@ -92,6 +92,7 @@ import org.dcache.services.bulk.activity.BulkActivityFactory;
 import org.dcache.services.bulk.handler.BulkSubmissionHandler;
 import org.dcache.services.bulk.manager.BulkRequestManager;
 import org.dcache.services.bulk.store.BulkRequestStore;
+import org.dcache.services.bulk.store.BulkTargetStore;
 import org.dcache.services.bulk.util.BulkServiceStatistics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -116,6 +117,7 @@ public final class BulkService implements CellLifeCycleAware, CellMessageReceive
     private BulkRequestManager requestManager;
     private BulkActivityFactory activityFactory;
     private BulkRequestStore requestStore;
+    private BulkTargetStore targetStore;
     private BulkSubmissionHandler submissionHandler;
     private BulkServiceStatistics statistics;
     private ExecutorService incomingExecutorService;
@@ -140,32 +142,7 @@ public final class BulkService implements CellLifeCycleAware, CellMessageReceive
          */
         waitForNamespace();
 
-        /*
-         * See store specifics for how reload is handled, but the minimal contract is
-         * that all incomplete requests be reset to the QUEUED state.
-         * There is no danger in a race here because the state of the
-         * requests is not checked until the request job manager is initialized
-         * and started.
-         */
-        try {
-            LOGGER.info("Loading requests into the request store/queue; "
-                  + "incomplete requests will be reset to QUEUED.");
-            requestStore.load();
-        } catch (BulkServiceException e) {
-            LOGGER.error("There was a problem reloading requests: {}.", e.toString());
-        }
-
-        try {
-            LOGGER.info("Initializing the job manager.");
-            requestManager.initialize();
-        } catch (Exception e) {
-            LOGGER.error("There was a problem initializing the job queue: {}.", e.toString());
-        }
-
-        LOGGER.info("Signalling the job manager.");
-        requestManager.signal();
-
-        LOGGER.info("Service startup completed.");
+        incomingExecutorService.execute(() -> initialize());
     }
 
     public Reply messageArrived(BulkRequestMessage message) {
@@ -177,15 +154,15 @@ public final class BulkService implements CellLifeCycleAware, CellMessageReceive
                 Subject subject = message.getSubject();
                 Restriction restriction = message.getRestriction();
                 checkQuota(subject);
-                String requestId = UUID.randomUUID().toString();
-                request.setId(requestId);
-                checkRestrictions(restriction, requestId);
+                String uid = UUID.randomUUID().toString();
+                request.setUid(uid);
+                checkRestrictions(restriction, uid);
                 checkActivity(request);
                 checkDepthConstraints(request);
                 requestStore.store(subject, restriction, request);
                 statistics.incrementRequestsReceived(request.getActivity());
                 requestManager.signal();
-                message.setRequestUrl(request.getUrlPrefix() + "/" + request.getId());
+                message.setRequestUrl(request.getUrlPrefix() + "/" + request.getUid());
                 reply.reply(message);
             } catch (BulkServiceException e) {
                 LOGGER.error("messageArrived(BulkRequestMessage) {}: {}", message, e.toString());
@@ -206,7 +183,8 @@ public final class BulkService implements CellLifeCycleAware, CellMessageReceive
         incomingExecutorService.execute(() -> {
             try {
                 List<BulkRequestSummary> requests = requestStore.getRequestSummaries(
-                            message.getStatus(), message.getOwners(), message.getPath())
+                            message.getStatus(), message.getOwners(), message.getPath(),
+                            message.getOffset())
                       .stream().collect(Collectors.toList());
                 message.setRequests(requests);
                 reply.reply(message);
@@ -230,10 +208,10 @@ public final class BulkService implements CellLifeCycleAware, CellMessageReceive
         incomingExecutorService.execute(() -> {
             try {
                 Subject subject = message.getSubject();
-                String requestId = message.getRequestId();
-                checkRestrictions(message.getRestriction(), requestId);
-                matchActivity(message.getActivity(), requestId);
-                BulkRequestInfo status = requestStore.getRequestInfo(subject, requestId,
+                String uuid = message.getRequestUuid();
+                checkRestrictions(message.getRestriction(), uuid);
+                matchActivity(message.getActivity(), uuid);
+                BulkRequestInfo status = requestStore.getRequestInfo(subject, uuid,
                       message.getOffset());
                 message.setInfo(status);
                 reply.reply(message);
@@ -257,15 +235,15 @@ public final class BulkService implements CellLifeCycleAware, CellMessageReceive
         incomingExecutorService.execute(() -> {
             try {
                 Subject subject = message.getSubject();
-                String requestId = message.getRequestId();
-                checkRestrictions(message.getRestriction(), requestId);
-                matchActivity(message.getActivity(), requestId);
+                String uuid = message.getRequestUuid();
+                checkRestrictions(message.getRestriction(), uuid);
+                matchActivity(message.getActivity(), uuid);
                 List<String> targetPaths = message.getTargetPaths();
                 if (targetPaths == null || targetPaths.isEmpty()) {
-                    submissionHandler.cancelRequest(subject, requestId);
+                    submissionHandler.cancelRequest(subject, uuid);
                 } else {
-                    validateTargets(requestId, subject, targetPaths);
-                    submissionHandler.cancelTargets(subject, requestId, targetPaths);
+                    validateTargets(uuid, subject, targetPaths);
+                    submissionHandler.cancelTargets(subject, uuid, targetPaths);
                 }
                 reply.reply(message);
             } catch (BulkServiceException e) {
@@ -287,11 +265,11 @@ public final class BulkService implements CellLifeCycleAware, CellMessageReceive
         MessageReply<Message> reply = new MessageReply<>();
         incomingExecutorService.execute(() -> {
             try {
-                String requestId = message.getRequestId();
+                String uuid = message.getRequestUuid();
                 Subject subject = message.getSubject();
-                checkRestrictions(message.getRestriction(), requestId);
-                matchActivity(message.getActivity(), requestId);
-                submissionHandler.clearRequest(subject, requestId, message.isCancelIfRunning());
+                checkRestrictions(message.getRestriction(), uuid);
+                matchActivity(message.getActivity(), uuid);
+                submissionHandler.clearRequest(subject, uuid, message.isCancelIfRunning());
                 reply.reply(message);
             } catch (BulkServiceException e) {
                 LOGGER.error("messageArrived(BulkRequestClearMessage) {}: {}", message,
@@ -377,6 +355,11 @@ public final class BulkService implements CellLifeCycleAware, CellMessageReceive
     }
 
     @Required
+    public void setTargetStore(BulkTargetStore targetStore) {
+        this.targetStore = targetStore;
+    }
+
+    @Required
     public void setIncomingExecutorService(ExecutorService incomingExecutorService) {
         this.incomingExecutorService = incomingExecutorService;
     }
@@ -430,23 +413,24 @@ public final class BulkService implements CellLifeCycleAware, CellMessageReceive
         statistics.addUserRequest(user);
     }
 
-    private void checkRestrictions(Restriction restriction, String requestId)
+    private void checkRestrictions(Restriction restriction, String uuid)
           throws BulkPermissionDeniedException, BulkStorageException {
         if (restriction == null || Restrictions.none().equals(restriction)) {
             return;
         }
 
-        Optional<Restriction> option = requestStore.getRestriction(requestId);
+        Optional<Restriction> option = requestStore.getRestriction(uuid);
         Restriction original = option.orElse(null);
 
         if (original != null && !original.isSubsumedBy(restriction)) {
-            throw new BulkPermissionDeniedException(requestId);
+            throw new BulkPermissionDeniedException(uuid);
         }
     }
 
     private synchronized void checkTargetCount(BulkRequest request)
           throws BulkPermissionDeniedException {
-        int listSize = request.getTarget().size();
+        List<String> targets = request.getTarget();
+        int listSize = targets == null ? 0 : targets.size();
         switch (request.getExpandDirectories()) {
             case NONE:
                 if (listSize > maxFlatTargets) {
@@ -472,17 +456,46 @@ public final class BulkService implements CellLifeCycleAware, CellMessageReceive
         }
     }
 
-    private void matchActivity(String activity, String requestId)
+    private void initialize() {
+        /*
+         * See store specifics for how reload is handled, but the minimal contract is
+         * that all incomplete requests be reset to the QUEUED state.
+         * There is no danger in a race here because the state of the
+         * requests is not checked until the request job manager is initialized
+         * and started.
+         */
+        try {
+            LOGGER.info("Loading requests into the request store/queue; "
+                  + "incomplete requests will be reset to QUEUED.");
+            requestStore.load();
+        } catch (BulkServiceException e) {
+            LOGGER.error("There was a problem reloading requests: {}.", e.toString());
+        }
+
+        try {
+            LOGGER.info("Initializing the job manager.");
+            requestManager.initialize();
+        } catch (Exception e) {
+            LOGGER.error("There was a problem initializing the job queue: {}.", e.toString());
+        }
+
+        LOGGER.info("Signalling the job manager.");
+        requestManager.signal();
+
+        LOGGER.info("Service startup completed.");
+    }
+
+    private void matchActivity(String activity, String uuid)
           throws BulkServiceException {
-        Optional<BulkRequest> request = requestStore.getRequest(requestId);
+        Optional<BulkRequest> request = requestStore.getRequest(uuid);
         if (request.isPresent()) {
             if (Strings.emptyToNull(activity) != null && !request.get().getActivity()
                   .equalsIgnoreCase(activity)) {
                 throw new BulkPermissionDeniedException(
-                      requestId + " activity does not match " + activity);
+                      uuid + " activity does not match " + activity);
             }
         } else {
-            throw new BulkStorageException("request " + requestId + " is not valid");
+            throw new BulkStorageException("request " + uuid + " is not valid");
         }
     }
 
@@ -512,15 +525,15 @@ public final class BulkService implements CellLifeCycleAware, CellMessageReceive
         }
     }
 
-    private void validateTargets(String requestId, Subject subject, List<String> paths)
+    private void validateTargets(String uuid, Subject subject, List<String> paths)
           throws BulkServiceException {
-        Optional<BulkRequest> optional = requestStore.getRequest(requestId);
+        Optional<BulkRequest> optional = requestStore.getRequest(uuid);
         if (optional.isEmpty()) {
-            throw new BulkRequestNotFoundException(requestId);
+            throw new BulkRequestNotFoundException(uuid);
         }
 
         BulkRequest request = optional.get();
-        if (!requestStore.isRequestSubject(subject, requestId)) {
+        if (!requestStore.isRequestSubject(subject, uuid)) {
             throw new BulkPermissionDeniedException("request not owned by user.");
         }
 
@@ -533,12 +546,13 @@ public final class BulkService implements CellLifeCycleAware, CellMessageReceive
         }
 
         String prefix = request.getTargetPrefix();
-        Set<FsPath> submitted = request.getTarget().stream().map(p -> computeFsPath(prefix, p))
+        Set<FsPath> submitted = targetStore.getInitialTargets(request.getId(), false)
+              .stream().map(p -> computeFsPath(prefix, p.getPath().toString()))
               .collect(Collectors.toSet());
         for (String path : paths) {
             if (!submitted.contains(findAbsolutePath(prefix, path))) {
                 throw new BulkServiceException(String.format(INVALID_TARGET,
-                      path, request.getActivity(), request.getId()));
+                      path, request.getActivity(), request.getUid()));
             }
         }
     }

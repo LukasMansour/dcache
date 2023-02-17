@@ -26,7 +26,7 @@ import static org.dcache.xrootd.protocol.XrootdProtocol.kXR_ArgMissing;
 import static org.dcache.xrootd.protocol.XrootdProtocol.kXR_FileNotOpen;
 import static org.dcache.xrootd.protocol.XrootdProtocol.kXR_IOError;
 import static org.dcache.xrootd.protocol.XrootdProtocol.kXR_InvalidRequest;
-import static org.dcache.xrootd.protocol.XrootdProtocol.kXR_NotAuthorized;
+import static org.dcache.xrootd.protocol.XrootdProtocol.kXR_ItExists;
 import static org.dcache.xrootd.protocol.XrootdProtocol.kXR_Qcksum;
 import static org.dcache.xrootd.protocol.XrootdProtocol.kXR_Qconfig;
 import static org.dcache.xrootd.protocol.XrootdProtocol.kXR_ServerError;
@@ -159,7 +159,7 @@ public class XrootdRedirectHandler extends ConcurrentXrootdRequestHandler {
 
         LoginSessionInfo(LoginReply reply) {
             subject = reply.getSubject();
-            restriction = reply.getRestriction();
+            restriction = computeRestriction(reply);
             userRootPath = reply.getLoginAttributes().stream()
                   .filter(RootDirectory.class::isInstance)
                   .findFirst()
@@ -189,6 +189,21 @@ public class XrootdRedirectHandler extends ConcurrentXrootdRequestHandler {
 
         public boolean isLoggedIn() {
             return loggedIn;
+        }
+
+        private Restriction computeRestriction(LoginReply reply) {
+            if (!Subjects.isNobody(subject)) {
+                return reply.getRestriction();
+            }
+
+            switch(_door.getAnonymousUserAccess()) {
+                case READONLY:
+                    return Restrictions.readOnly();
+                case FULL:
+                    return Restrictions.none();
+                default:
+                    return Restrictions.denyAll();
+            }
         }
     }
 
@@ -458,7 +473,7 @@ public class XrootdRedirectHandler extends ConcurrentXrootdRequestHandler {
         } catch (FileNotFoundCacheException e) {
             return withError(ctx, req, xrootdErrorCode(e.getRc()), "No such file");
         } catch (FileExistsCacheException e) {
-            return withError(ctx, req, kXR_NotAuthorized, "File already exists");
+            return withError(ctx, req, kXR_ItExists, "File already exists");
         } catch (TimeoutCacheException e) {
             return withError(ctx, req, xrootdErrorCode(e.getRc()), "Internal timeout");
         } catch (PermissionDeniedCacheException e) {
@@ -507,7 +522,8 @@ public class XrootdRedirectHandler extends ConcurrentXrootdRequestHandler {
         InetSocketAddress redirectAddress;
 
         if (_door.isProxied()) {
-            redirectAddress = _door.createProxy(poolAddress).start();
+            redirectAddress = _door.createProxy(poolAddress)
+                  .start(transfer.getClientAddress().getAddress());
         } else {
             redirectAddress = poolAddress;
         }

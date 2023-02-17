@@ -63,7 +63,6 @@ import static org.dcache.services.bulk.BulkRequestStatus.CANCELLED;
 import static org.dcache.services.bulk.BulkRequestStatus.CANCELLING;
 import static org.dcache.services.bulk.BulkRequestStatus.COMPLETED;
 
-import diskCacheV111.util.FsPath;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
@@ -81,9 +80,7 @@ import org.dcache.services.bulk.manager.BulkRequestManager;
 import org.dcache.services.bulk.store.BulkRequestStore;
 import org.dcache.services.bulk.store.BulkTargetStore;
 import org.dcache.services.bulk.util.BulkRequestTarget;
-import org.dcache.services.bulk.util.BulkRequestTargetBuilder;
 import org.dcache.services.bulk.util.BulkServiceStatistics;
-import org.dcache.vehicles.FileAttributes;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Required;
@@ -108,25 +105,6 @@ public final class BulkRequestHandler implements BulkSubmissionHandler,
     private BulkRequestStore requestStore;
     private BulkServiceStatistics statistics;
     private ExecutorService cancelExecutor;
-
-    /**
-     * Caused by an internal issue.
-     * <p>
-     * Essentially a premature failure.
-     */
-    @Override
-    public void abortRequestTarget(BulkRequestTarget parent, FsPath path, FileAttributes attributes,
-          Throwable exception)
-          throws BulkServiceException {
-        LOGGER.trace("requestTargetAborted {}, {}, {}; calling abort on request store",
-              parent, path, exception.toString());
-        targetStore.abort(
-              BulkRequestTargetBuilder.builder().rid(parent.getRid()).pid(parent.getId())
-                    .activity(parent.getActivity()).path(path).attributes(attributes)
-                    .error(exception).build());
-        requestManager.signal();
-        statistics.incrementJobsAborted();
-    }
 
     @Override
     public void cancelRequest(Subject subject, String id) throws BulkServiceException {
@@ -158,7 +136,8 @@ public final class BulkRequestHandler implements BulkSubmissionHandler,
     @Override
     public void clearRequest(Subject subject, String id, boolean cancelIfRunning)
           throws BulkServiceException {
-        if (requestHasUnprocessedJobs(id)) {
+        Long key = requestStore.getKey(id);
+        if (requestHasUnprocessedJobs(key)) {
             if (!cancelIfRunning) {
                 throw new BulkPermissionDeniedException(id + ": " + PREMATURE_CLEAR_ERROR);
             }
@@ -179,7 +158,8 @@ public final class BulkRequestHandler implements BulkSubmissionHandler,
     public boolean checkTerminated(String id, boolean cancelled) {
         boolean terminated = setStateIfTerminated(id, cancelled);
         try {
-            if (!terminated && requestHasFailedJobs(id)) {
+            Long key = requestStore.getKey(id);
+            if (!terminated && requestHasFailedJobs(key)) {
                 requestStore.getRequest(id).ifPresent(request -> {
                     if (request.isCancelOnFailure()) {
                         /*
@@ -251,6 +231,11 @@ public final class BulkRequestHandler implements BulkSubmissionHandler,
                     case COMPLETED:
                         LOGGER.debug("already terminated: {}.", id);
                         return;
+                    case QUEUED:
+                        /* cancel all targets*/
+                        Long key = requestStore.getKey(id);
+                        targetStore.cancelAll(key);
+                        break;
                 }
             } else {
                 throw new IllegalStateException("request status for " + id
@@ -311,14 +296,14 @@ public final class BulkRequestHandler implements BulkSubmissionHandler,
         return requestStore.getRequest(id).isPresent();
     }
 
-    private boolean requestHasUnprocessedJobs(String id)
+    private boolean requestHasUnprocessedJobs(Long rid)
           throws BulkStorageException {
-        return targetStore.countUnprocessed(id) > 0;
+        return targetStore.countUnprocessed(rid) > 0;
     }
 
-    private boolean requestHasFailedJobs(String id)
+    private boolean requestHasFailedJobs(Long rid)
           throws BulkStorageException {
-        return targetStore.countFailed(id) > 0;
+        return targetStore.countFailed(rid) > 0;
     }
 
     private boolean setStateIfTerminated(String id, boolean cancelled) {
@@ -336,7 +321,7 @@ public final class BulkRequestHandler implements BulkSubmissionHandler,
     }
 
     private boolean storeJobTarget(BulkRequestTarget target) throws BulkServiceException {
-        String requestId = target.getRid();
+        String requestId = target.getRuid();
         String key = target.getKey();
 
         if (!isRequestActive(requestId)) {

@@ -207,7 +207,7 @@ public final class ConcurrentRequestManager implements BulkRequestManager {
                 throw new InterruptedException();
             }
 
-            updateJobStatistics(start);
+            statistics.sweepFinished(System.currentTimeMillis() - start);
 
             LOGGER.trace("doRun() completed");
         }
@@ -254,15 +254,6 @@ public final class ConcurrentRequestManager implements BulkRequestManager {
                 userRequests().values().stream().filter(this::isTerminated)
                       .forEach(requestJobs::remove);
             }
-        }
-
-        private void updateJobStatistics(long start) {
-            try {
-                statistics.activeRequests(requestStore.countActive());
-            } catch (BulkStorageException e) {
-                LOGGER.error("problem finding number of active requests: {}.", e.toString());
-            }
-            statistics.sweepFinished(System.currentTimeMillis() - start);
         }
 
         private ListMultimap<String, String> userRequests() {
@@ -468,7 +459,7 @@ public final class ConcurrentRequestManager implements BulkRequestManager {
     @Override
     public void submit(AbstractRequestContainerJob job) {
         synchronized (requestJobs) {
-            requestJobs.put(job.getTarget().getRid(), job);
+            requestJobs.put(job.getTarget().getRuid(), job);
         }
 
         processor.signal();
@@ -479,20 +470,20 @@ public final class ConcurrentRequestManager implements BulkRequestManager {
      *   submit() above.
      */
     void activateRequest(BulkRequest request) {
-        LOGGER.trace("activateRequest {}.", request.getId());
+        LOGGER.trace("activateRequest {}.", request.getUid());
         try {
             submissionHandler.submitRequestJob(request);
-            LOGGER.debug("activateRequest, updating {} to STARTED.", request.getId());
-            requestStore.update(request.getId(), STARTED);
+            LOGGER.debug("activateRequest, updating {} to STARTED.", request.getUid());
+            requestStore.update(request.getUid(), STARTED);
         } catch (BulkStorageException e) {
             LOGGER.error(
                   "Unrecoverable storage update error for {}: {}; aborting.",
-                  request.getId(),
+                  request.getUid(),
                   e.toString());
             requestStore.abort(request, e);
         } catch (BulkServiceException e) {
             LOGGER.error(
-                  "Problem activating request for {}: {}; aborting.", request.getId(),
+                  "Problem activating request for {}: {}; aborting.", request.getUid(),
                   e.toString());
             requestStore.abort(request, e);
         } catch (RuntimeException e) {
@@ -512,11 +503,8 @@ public final class ConcurrentRequestManager implements BulkRequestManager {
         try {
             if (isJobValid(job)) { /* possibly cancelled in flight */
                 job.update(State.RUNNING);
-                    targetStore.update(id, State.RUNNING, null);
                 job.getActivity().getActivityExecutor().submit(new FireAndForgetTask(job));
             }
-        } catch (BulkStorageException e) {
-            LOGGER.error("updateJobState", e.toString());
         } catch (RuntimeException e) {
             job.getTarget().setErrorObject(e);
             job.cancel();
@@ -539,7 +527,7 @@ public final class ConcurrentRequestManager implements BulkRequestManager {
 
         Optional<BulkRequestStatus> status;
         try {
-            status = requestStore.getRequestStatus(target.getRid());
+            status = requestStore.getRequestStatus(target.getRuid());
         } catch (BulkStorageException e) {
             LOGGER.error("isJobValid {}: {}", target, e.toString());
             return false;

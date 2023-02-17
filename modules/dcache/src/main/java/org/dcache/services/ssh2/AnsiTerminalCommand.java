@@ -11,6 +11,7 @@ import dmg.util.CommandException;
 import dmg.util.CommandExitException;
 import dmg.util.CommandPanicException;
 import dmg.util.CommandSyntaxException;
+import dmg.util.PagedCommandResult;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -151,16 +152,43 @@ public class AnsiTerminalCommand implements Command, Runnable {
 
     private void runAsciiMode() throws IOException {
         Ansi.setEnabled(_useColors);
+        PagedCommandResult pagedResult = null;
+        String command = null;
+
         while (true) {
-            String prompt = Ansi.ansi().bold().a(_userAdminShell.getPrompt()).boldOff().toString();
             Object result;
+            String prompt;
+
+            if (pagedResult != null) {
+                prompt = Ansi.ansi().bold().a(_userAdminShell.getYesNoPrompt()).boldOff().toString();
+            } else {
+                prompt = Ansi.ansi().bold().a(_userAdminShell.getPrompt()).boldOff().toString();
+            }
+
             try {
                 String str = _console.readLine(prompt);
                 try {
                     if (str == null) {
                         throw new CommandExitException();
                     }
-                    result = _userAdminShell.executeCommand(str);
+
+                    if (pagedResult != null) {
+                        if (str.equalsIgnoreCase("Y")) {
+                            result = _userAdminShell.executeCommand(pagedResult.nextCommand());
+                        } else if (!str.equalsIgnoreCase("N")) {
+                            _console.println("Please indicate choice using either 'Y' for yes "
+                                  + "or 'N' for no.");
+                            _console.flush();
+                            continue;
+                        } else {
+                            result = null;
+                            command = null;
+                            pagedResult = null;
+                        }
+                    } else {
+                        command = str;
+                        result = _userAdminShell.executeCommand(command);
+                    }
                 } catch (IllegalArgumentException e) {
                     result = e.toString();
                 } catch (SerializationException e) {
@@ -194,11 +222,15 @@ public class AnsiTerminalCommand implements Command, Runnable {
                 _console.getCursorBuffer().clear();
                 _console.println();
                 result = null;
+                command = null;
+                pagedResult = null;
             } catch (InterruptedException e) {
                 _console.println("^C");
                 _console.flush();
                 _console.getCursorBuffer().clear();
                 result = null;
+                command = null;
+                pagedResult = null;
             } catch (IOException e) {
                 throw e;
             } catch (Exception e) {
@@ -219,16 +251,31 @@ public class AnsiTerminalCommand implements Command, Runnable {
                         sb.a("Help : ").newline();
                         sb.a(help);
                     }
+                    command = null;
                     _console.println(sb.reset().toString());
                 } else {
-                    String s;
-                    s = Strings.toMultilineString(result);
+                    if (result instanceof PagedCommandResult) {
+                        pagedResult = (PagedCommandResult) result;
+                        result = pagedResult.getPartialResult();
+                        if (pagedResult.isEOL()) {
+                            pagedResult = null;
+                            command = null;
+                        } else {
+                            pagedResult.setCommand(command);
+                        }
+                    } else {
+                        pagedResult = null;
+                        command = null;
+                    }
+
+                    String s = Strings.toMultilineString(result);
                     if (!s.isEmpty()) {
                         _console.println(s);
                         _console.flush();
                     }
                 }
             }
+
             _console.flush();
         }
     }

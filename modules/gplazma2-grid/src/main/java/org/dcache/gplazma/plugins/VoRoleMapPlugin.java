@@ -10,7 +10,6 @@ import java.security.Principal;
 import java.util.List;
 import java.util.Properties;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 import org.dcache.auth.FQAN;
 import org.dcache.auth.FQANPrincipal;
 import org.dcache.auth.GroupNamePrincipal;
@@ -29,21 +28,16 @@ public class VoRoleMapPlugin implements GPlazmaMappingPlugin {
     private static final Logger _log =
           LoggerFactory.getLogger(VoRoleMapPlugin.class);
 
-    private static final long REFRESH_PERIOD =
-          TimeUnit.SECONDS.toMillis(10);
+    private static final String VOROLEMAP = "gplazma.vorolemap.file";
 
-    private static final String VOROLEMAP =
-          "gplazma.vorolemap.file";
-
-    private final SourceBackedPredicateMap<NameRolePair, String> _map;
+    private final PredicateMap<NameRolePair, String> _map;
 
     public VoRoleMapPlugin(Properties properties) throws IOException {
         String path = properties.getProperty(VOROLEMAP);
 
         checkArgument(path != null, "Undefined property: " + VOROLEMAP);
 
-        _map = new SourceBackedPredicateMap<>(new FileLineSource(path, REFRESH_PERIOD),
-              new VOMapLineParser());
+        _map = new FileBackedPredicateMap(path, VOMapLineParser::new);
     }
 
     /**
@@ -51,7 +45,7 @@ public class VoRoleMapPlugin implements GPlazmaMappingPlugin {
      *
      * @param map map of dnfqans to usernames
      */
-    VoRoleMapPlugin(SourceBackedPredicateMap<NameRolePair, String> map) {
+    VoRoleMapPlugin(PredicateMap<NameRolePair, String> map) {
         _map = map;
     }
 

@@ -1,7 +1,7 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
     <groupId>org.dcache</groupId>
-    <version>8.2.0-SNAPSHOT</version>
+    <version>9.0.0-SNAPSHOT</version>
     <artifactId>dcache-parent</artifactId>
     <packaging>pom</packaging>
 
@@ -62,16 +62,16 @@
 
         <version.slf4j>1.7.32</version.slf4j>
         <version.milton>2.7.3.0-dcache-1</version.milton>
-        <version.spring>5.2.22.RELEASE</version.spring>
+        <version.spring>5.3.22</version.spring>
         <!-- Remember to sync aspectj version in dcache.properties -->
-        <version.aspectj>1.9.2</version.aspectj>
+        <version.aspectj>1.9.9.1</version.aspectj>
         <version.smc>6.6.0</version.smc>
         <version.xerces>2.12.0</version.xerces>
         <version.jetty>9.4.44.v20210927</version.jetty>
-        <version.xrootd4j>4.5.0</version.xrootd4j>
+        <version.xrootd4j>4.5.4</version.xrootd4j>
         <version.jersey>2.28</version.jersey>
         <version.dcache-view>2.0.2</version.dcache-view>
-        <version.netty>4.1.71.Final</version.netty>
+        <version.netty>4.1.77.Final</version.netty>
         <version.dcache>${project.version}</version.dcache>
         <version.swagger-ui>3.1.7</version.swagger-ui>
 
@@ -79,7 +79,7 @@
              when upgrading logback. -->
         <version.logback>1.2.10</version.logback>
         <version.logback.contrib>0.1.5</version.logback.contrib>
-        <version.jackson>2.12.1</version.jackson>
+        <version.jackson>2.14.0</version.jackson>
         <version.jna>5.4.0</version.jna>
         <version.fst>2.56</version.fst>
         <jmh.version>1.35</jmh.version>
@@ -396,7 +396,7 @@
             <dependency>
                 <groupId>org.postgresql</groupId>
                 <artifactId>postgresql</artifactId>
-                <version>42.3.3</version>
+                <version>42.3.8</version>
             </dependency>
             <dependency>
                 <groupId>io.milton</groupId>
@@ -797,13 +797,13 @@
             </dependency>
             <dependency>
                 <groupId>org.python</groupId>
-                <artifactId>jython</artifactId>
-                <version>2.5.3</version>
+                <artifactId>jython-standalone</artifactId>
+                <version>2.7.3</version>
             </dependency>
         <dependency>
             <groupId>org.dcache</groupId>
             <artifactId>nfs4j-core</artifactId>
-            <version>0.23.0</version>
+            <version>0.24.1</version>
         </dependency>
         <dependency>
             <groupId>com.github.nitram509</groupId>

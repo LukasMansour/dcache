@@ -59,7 +59,6 @@ documents or software obtained from this server.
  */
 package org.dcache.services.bulk.store;
 
-import diskCacheV111.util.FsPath;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -95,7 +94,7 @@ public interface BulkTargetStore {
      *
      * @param rid of this request.
      */
-    void cancelAll(String rid);
+    void cancelAll(Long rid);
 
     /**
      * @param filter to match.
@@ -107,13 +106,13 @@ public interface BulkTargetStore {
      * @param rid of this request.
      * @return the number of unprocessed targets.
      */
-    int countUnprocessed(String rid) throws BulkStorageException;
+    int countUnprocessed(Long rid) throws BulkStorageException;
 
     /**
      * @param rid of this request.
      * @return the number of unprocessed jobs.
      */
-    int countFailed(String rid) throws BulkStorageException;
+    int countFailed(Long rid) throws BulkStorageException;
 
     /**
      * @param filter     on targets to be included in the count.
@@ -129,20 +128,6 @@ public interface BulkTargetStore {
     Map<String, Long> countsByState();
 
     /**
-     * @param rid remove all jobs belonging to this request.
-     * @throws BulkStorageException
-     */
-    void delete(String rid) throws BulkStorageException;
-
-    /**
-     * @param rid of the request.
-     * @param path of the target.
-     * @return true if it exists in the store, false otherwise.
-     */
-    boolean exists(String rid, FsPath path);
-
-
-    /**
      * @param filter on the target.
      * @param limit  max targets to return (can be <code>null</code>).
      * @return a list of targets which match the filter.
@@ -152,12 +137,19 @@ public interface BulkTargetStore {
           throws BulkStorageException;
 
     /**
+     * @param rid of the request the targets belong to.
+     * @param nonterminal only the initial targets which have not yet run.
+     * @return paths of the targets
+     */
+    List<BulkRequestTarget> getInitialTargets(Long rid, boolean nonterminal);
+
+    /**
      * @param type  REGULAR or DIR.
      * @param limit max targets to return (can be <code>null</code>).
      * @return a list of targets which are ready to run.
      * @throws BulkStorageException
      */
-    List<BulkRequestTarget> nextReady(String rid, FileType type, Integer limit)
+    List<BulkRequestTarget> nextReady(Long rid, FileType type, Integer limit)
           throws BulkStorageException;
 
     /**
@@ -166,13 +158,6 @@ public interface BulkTargetStore {
      * @throws BulkStorageException
      */
     Optional<BulkRequestTarget> getTarget(long id) throws BulkStorageException;
-
-    /**
-     * @param targetPath to match
-     * @return all requests whose targets include this path as either parent or full path.
-     * @throws BulkStorageException
-     */
-    List<String> ridsOf(String targetPath);
 
     /**
      * Store the target.
@@ -184,6 +169,14 @@ public interface BulkTargetStore {
      boolean store(BulkRequestTarget target) throws BulkStorageException;
 
     /**
+     * Store or update the target if it already exists.
+     *
+     * @param target to store.
+     * @throws BulkStorageException
+     */
+    void storeOrUpdate(BulkRequestTarget target) throws BulkStorageException;
+
+    /**
      * Update the status of the target.
      *
      * @param id
@@ -191,5 +184,5 @@ public interface BulkTargetStore {
      * @param errorObject
      * @throws BulkStorageException
      */
-    void update(long id, State state, Throwable errorObject) throws BulkStorageException;
+    void update(Long id, State state, Throwable errorObject) throws BulkStorageException;
 }

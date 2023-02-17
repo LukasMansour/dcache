@@ -90,11 +90,14 @@ public final class BulkRequestTarget {
     }
 
     public static final FsPath ROOT_REQUEST_PATH = computeFsPath(null, "=request_target=");
-    public static final long ROOT_REQUEST_PARENT = -1L;
     public static final PnfsId PLACEHOLDER_PNFSID = new PnfsId("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF");
 
     public enum State {
         CREATED, READY, RUNNING, CANCELLED, COMPLETED, FAILED, SKIPPED
+    }
+
+    public enum PID {
+        ROOT, INITIAL, DISCOVERED
     }
 
     private static final String INVALID_STATE_TRANSITION =
@@ -111,11 +114,12 @@ public final class BulkRequestTarget {
         return key.split(KEY_SEPARATOR);
     }
 
-    private long id;
-    private Long pid;
-    private String rid;
+    private Long id;
+    private PID pid;
+    private Long rid;
+    private String ruid;
     private FsPath path;
-    private String activity;  /** denormalized from request **/
+    private String activity;
     private State state;
     private long createdAt;
     private Long startedAt;
@@ -200,19 +204,19 @@ public final class BulkRequestTarget {
         return createdAt;
     }
 
-    public long getId() {
+    public Long getId() {
         return id;
     }
 
     public String getKey() {
-        return String.format(KEY_FORMAT, rid, id);
+        return String.format(KEY_FORMAT, ruid, id);
     }
 
     public long getLastUpdated() {
         return lastUpdated;
     }
 
-    public Long getPid() {
+    public PID getPid() {
         return pid;
     }
 
@@ -228,8 +232,12 @@ public final class BulkRequestTarget {
         return retried;
     }
 
-    public String getRid() {
+    public Long getRid() {
         return rid;
+    }
+
+    public String getRuid() {
+        return ruid;
     }
 
     public Long getStartedAt() {
@@ -271,7 +279,7 @@ public final class BulkRequestTarget {
         }
     }
 
-    public void setId(long id) {
+    public void setId(Long id) {
         this.id = id;
     }
 
@@ -283,12 +291,16 @@ public final class BulkRequestTarget {
         this.path = path;
     }
 
-    public void setPid(Long pid) {
+    public void setPid(PID pid) {
         this.pid = pid;
     }
 
-    public void setRid(String rid) {
+    public void setRid(Long rid) {
         this.rid = rid;
+    }
+
+    public void setRuid(String ruid) {
+        this.ruid = ruid;
     }
 
     public void setRetried(int retried) {
@@ -355,7 +367,7 @@ public final class BulkRequestTarget {
 
     @Override
     public String toString() {
-        return String.format(TARGET_FORMAT, id, pid, rid, activity,
+        return String.format(TARGET_FORMAT, id, pid, ruid, activity,
               state, new Timestamp(createdAt), startedAt == null ? null : new Timestamp(startedAt),
               new Timestamp(lastUpdated), retried, getType(), getPnfsId(), path, errorObject);
     }

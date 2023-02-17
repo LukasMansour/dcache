@@ -80,6 +80,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.util.concurrent.ScheduledExecutorService;
+import org.dcache.xrootd.OutboundExceptionHandler;
 import org.dcache.xrootd.core.XrootdException;
 import org.dcache.xrootd.protocol.messages.ErrorResponse;
 import org.dcache.xrootd.protocol.messages.LoginRequest;
@@ -110,6 +111,7 @@ public class ProxyRequestHandler extends ChannelInboundHandlerAdapter {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ProxyRequestHandler.class);
 
+    private final NettyXrootProxyAdapter adapter;
     private final String proxyId;
     private final ProxyResponseHandler responseHandler;
     private final ProxyErrorHandler errorHandler;
@@ -122,6 +124,7 @@ public class ProxyRequestHandler extends ChannelInboundHandlerAdapter {
     ProxyRequestHandler(NettyXrootProxyAdapter proxyAdapter, EventLoopGroup clientGroup,
           InetSocketAddress poolAddress, TLSSessionInfo tlsSessionInfo,
           ScheduledExecutorService executorService) throws Exception {
+        adapter = proxyAdapter;
         proxyId = proxyAdapter.getProxyId();
         this.tlsSessionInfo = tlsSessionInfo;
         ProxyResponseDecoder decoder = new ProxyResponseDecoder(proxyId);
@@ -137,6 +140,7 @@ public class ProxyRequestHandler extends ChannelInboundHandlerAdapter {
                   @Override
                   protected void initChannel(Channel ch) {
                       ChannelPipeline pipeline = ch.pipeline();
+                      pipeline.addLast("outerrors", new OutboundExceptionHandler());
                       pipeline.addLast("sender", new ProxyOutboundEncoder());
                       pipeline.addLast("decoder", decoder);
                       pipeline.addLast("receiver", responseHandler);
@@ -221,6 +225,7 @@ public class ProxyRequestHandler extends ChannelInboundHandlerAdapter {
 
     void shutdown() throws InterruptedException {
         responseHandler.shutDown();
+        adapter.shutdown();
         LOGGER.debug("ProxyRequestHandler {}, shutdown.", proxyId);
     }
 

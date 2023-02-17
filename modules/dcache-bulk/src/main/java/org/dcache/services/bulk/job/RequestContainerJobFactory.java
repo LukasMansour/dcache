@@ -60,7 +60,6 @@ documents or software obtained from this server.
 package org.dcache.services.bulk.job;
 
 import static org.dcache.services.bulk.util.BulkRequestTarget.PLACEHOLDER_PNFSID;
-import static org.dcache.services.bulk.util.BulkRequestTarget.ROOT_REQUEST_PARENT;
 import static org.dcache.services.bulk.util.BulkRequestTarget.ROOT_REQUEST_PATH;
 
 import diskCacheV111.util.PnfsHandler;
@@ -77,7 +76,9 @@ import org.dcache.services.bulk.activity.BulkActivityFactory;
 import org.dcache.services.bulk.store.BulkRequestStore;
 import org.dcache.services.bulk.store.BulkTargetStore;
 import org.dcache.services.bulk.util.BulkRequestTarget;
+import org.dcache.services.bulk.util.BulkRequestTarget.PID;
 import org.dcache.services.bulk.util.BulkRequestTargetBuilder;
+import org.dcache.services.bulk.util.BulkServiceStatistics;
 import org.dcache.util.list.ListDirectoryHandler;
 import org.dcache.vehicles.FileAttributes;
 import org.slf4j.Logger;
@@ -97,10 +98,11 @@ public final class RequestContainerJobFactory {
     private CellStub pnfsManager;
     private ListDirectoryHandler listHandler;
     private BulkTargetStore targetStore;
+    private BulkServiceStatistics statistics;
 
     public AbstractRequestContainerJob createRequestJob(BulkRequest request)
           throws BulkServiceException {
-        String rid = request.getId();
+        String rid = request.getUid();
         LOGGER.trace("createRequestJob {}", rid);
 
         BulkActivity activity = create(request);
@@ -112,19 +114,19 @@ public final class RequestContainerJobFactory {
         attributes.setPnfsId(PLACEHOLDER_PNFSID);
         BulkRequestTarget target = BulkRequestTargetBuilder.builder()
               .activity(activity.getName())
-              .rid(request.getId()).pid(ROOT_REQUEST_PARENT).attributes(attributes)
+              .rid(request.getId()).ruid(request.getUid()).pid(PID.ROOT).attributes(attributes)
               .path(ROOT_REQUEST_PATH).build();
 
         PnfsHandler pnfsHandler = new PnfsHandler(pnfsManager);
         pnfsHandler.setRestriction(activity.getRestriction());
         pnfsHandler.setSubject(activity.getSubject());
 
-        LOGGER.trace("createRequestJob {}, creating batch request job.", request.getId());
+        LOGGER.trace("createRequestJob {}, creating batch request job.", request.getUid());
         AbstractRequestContainerJob containerJob;
         if (request.isPrestore()) {
-            containerJob = new PrestoreRequestContainerJob(activity, target, request);
+            containerJob = new PrestoreRequestContainerJob(activity, target, request, statistics);
         } else {
-            containerJob = new RequestContainerJob(activity, target, request);
+            containerJob = new RequestContainerJob(activity, target, request, statistics);
         }
 
         containerJob.setNamespaceHandler(pnfsHandler);
@@ -155,12 +157,17 @@ public final class RequestContainerJobFactory {
     }
 
     @Required
+    public void setStatistics(BulkServiceStatistics statistics) {
+        this.statistics = statistics;
+    }
+
+    @Required
     public void setTargetStore(BulkTargetStore targetStore) {
         this.targetStore = targetStore;
     }
 
     BulkActivity create(BulkRequest request) throws BulkServiceException {
-        String rid = request.getId();
+        String rid = request.getUid();
 
         Optional<Subject> subject = requestStore.getSubject(rid);
         if (!subject.isPresent()) {

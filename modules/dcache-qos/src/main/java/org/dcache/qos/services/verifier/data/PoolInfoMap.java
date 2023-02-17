@@ -193,11 +193,14 @@ public class PoolInfoMap {
     private final Lock write = lock.writeLock();
     private final Lock read = lock.readLock();
 
+    private int verifyWarnings = 0;
+
     /**
      * Called on a dedicated thread. Applies a diff under write lock.
      */
     public void apply(PoolInfoDiff diff) {
         write.lock();
+        verifyWarnings = 0;
         try {
             /*
              *  -- Remove stale pools, pool groups and storage units.
@@ -289,6 +292,7 @@ public class PoolInfoMap {
                     verifyConstraints(pg.getName());
                 } catch (IllegalStateException e) {
                     sendPoolGroupMisconfiguredAlarm(pg.getName());
+                    ++verifyWarnings;
                 }
             });
         } finally {
@@ -360,6 +364,11 @@ public class PoolInfoMap {
         } finally {
             read.unlock();
         }
+    }
+
+    @VisibleForTesting
+    public int verifyWarnings() {
+        return verifyWarnings;
     }
 
     public Set<String> getExcludedLocationNames(Collection<String> members) {
@@ -584,6 +593,19 @@ public class PoolInfoMap {
         }
     }
 
+    public boolean isPoolDraining(String pool) {
+        read.lock();
+        try {
+            PoolInformation info = poolInfo.get(pool);
+            if (info == null || info.getMode() == null) {
+                return false;
+            }
+            return info.getMode().isDisabled(PoolV2Mode.DRAINING);
+        } finally {
+            read.unlock();
+        }
+    }
+
     public boolean isPoolViable(String pool, boolean writable) {
         read.lock();
         try {
@@ -674,6 +696,24 @@ public class PoolInfoMap {
     }
 
     @VisibleForTesting
+        /* Only used by unit test */
+    public boolean hasGroup(String group) {
+        return markers.get(group) != null;
+    }
+
+    @VisibleForTesting
+        /* Only used by unit test */
+    public boolean hasPool(String pool) {
+        return pools.contains(pool);
+    }
+
+    @VisibleForTesting
+        /* Only used by unit test */
+    public boolean hasUnit(String unit) {
+        return constraints.containsKey(unit);
+    }
+
+    @VisibleForTesting
     /** Called under write lock **/
     void removeGroup(String group) {
         markers.remove(group);
@@ -719,7 +759,7 @@ public class PoolInfoMap {
         Collection<StorageUnit> newUnits = diff.getNewUnits();
         for (StorageUnit unit : newUnits) {
             String name = unit.getName();
-            StorageUnitInfoExtractor.getPrimaryGroupsFor(name, psu)
+            StorageUnitInfoExtractor.getPoolGroupsFor(name, psu, false)
                   .stream()
                   .forEach(g -> diff.unitsAdded.put(g, name));
         }
@@ -821,9 +861,8 @@ public class PoolInfoMap {
                 diff.getModeChanged().put(pool, newMode);
             }
 
-            ImmutableMap<String, String> newTags
-                  = getPoolTags(pool, costModule);
-            ImmutableMap<String, String> oldTags = info.getTags();
+            Map<String, String> newTags = getPoolTags(pool, costModule);
+            Map<String, String> oldTags = info.getTags();
             if (oldTags == null ||
                   (newTags != null && !oldTags.equals(newTags))) {
                 diff.getTagsChanged().put(pool, newTags);
@@ -1061,7 +1100,7 @@ public class PoolInfoMap {
      **/
     private PoolInformation setPoolInfo(String pool,
           PoolV2Mode mode,
-          ImmutableMap<String, String> tags,
+          Map<String, String> tags,
           PoolCostInfo cost) {
         PoolInformation entry = poolInfo.getOrDefault(pool, new PoolInformation(pool));
         entry.update(mode, tags, cost);

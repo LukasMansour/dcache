@@ -63,6 +63,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Splitter;
 import com.google.common.base.Strings;
 import com.google.gson.Gson;
+import com.google.gson.JsonParseException;
 import io.swagger.annotations.Api;
 import io.swagger.annotations.ApiOperation;
 import io.swagger.annotations.ApiParam;
@@ -72,11 +73,13 @@ import io.swagger.annotations.Authorization;
 import io.swagger.annotations.Example;
 import io.swagger.annotations.ExampleProperty;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 import javax.inject.Inject;
 import javax.security.auth.Subject;
 import javax.servlet.http.HttpServletRequest;
@@ -141,7 +144,9 @@ public final class BulkResources {
      * @owner A comma-separated list of owners to match; unspecified returns all requests.
      */
     @GET
-    @ApiOperation("Get the summary info of current bulk operations.")
+    @ApiOperation("Get the summary info of current bulk operations.  If the number of requests "
+          + "returned equals 10K, retry using the offset (highest returned seqNo + 1) "
+          + "to fetch more requests.")
     @ApiResponses({
           @ApiResponse(code = 400, message = "Bad request"),
           @ApiResponse(code = 500, message = "Internal Server Error")
@@ -154,6 +159,9 @@ public final class BulkResources {
           @QueryParam("status") String status,
           @ApiParam("A comma-separated list of owners to match; unspecified returns all requests.")
           @QueryParam("owner") String owner,
+          @ApiParam("Offset for the request list (max length = 10K).")
+          @DefaultValue("0")
+          @QueryParam("offset") long offset,
           @ApiParam("A path to match (as parent or full path); unspecified returns all requests.")
           @QueryParam("path") String path) {
 
@@ -173,8 +181,7 @@ public final class BulkResources {
             ownerSet = null;
         }
 
-        BulkRequestListMessage message = new BulkRequestListMessage(statusSet, ownerSet, path);
-
+        BulkRequestListMessage message = new BulkRequestListMessage(statusSet, ownerSet, path, offset);
         message = service.send(message);
 
         return message.getRequests();
@@ -238,7 +245,9 @@ public final class BulkResources {
      * data fields.
      */
     @GET
-    @ApiOperation("Get the status information for an individual bulk request.")
+    @ApiOperation("Get the status information for an individual bulk request. If the number of "
+          + "request targets equals 10K, retry using the offset (highest returned seqNo + 1) "
+          + "to fetch more targets.")
     @ApiResponses({
           @ApiResponse(code = 400, message = "Bad request"),
           @ApiResponse(code = 401, message = "Unauthorized"),
@@ -403,7 +412,14 @@ public final class BulkResources {
             throw new BadRequestException("empty request payload.");
         }
 
-        Map map = new Gson().fromJson(requestPayload, Map.class);
+        Map map;
+        try {
+            map = new Gson().fromJson(requestPayload, Map.class);
+        } catch (JsonParseException e) {
+            throw new BadRequestException(
+                  String.format("badly formed json object (%s): %s.", requestPayload, e));
+        }
+
         BulkRequest request = new BulkRequest();
 
         Map<String, Object> arguments = (Map<String, Object>) map.remove("arguments");
@@ -414,21 +430,23 @@ public final class BulkResources {
             request.setArguments(stringified);
         }
 
-        request.setTarget((List<String>) map.remove("target"));
+        List<String> targets = extractTarget(map);
+        if (targets.isEmpty()) {
+            throw new BadRequestException("request contains no targets.");
+        }
+        request.setTarget(targets);
 
         String string = removeEntry(map, String.class, "activity");
         request.setActivity(string);
 
-        string = removeEntry(map, String.class, "target_prefix", "target-prefix", "targetPrefix");
+        string = removeEntry(map, String.class, "target_prefix", "target-prefix",
+              "targetPrefix");
         request.setTargetPrefix(string);
 
         string = removeEntry(map, String.class, "expand_directories", "expand-directories",
               "expandDirectories");
         request.setExpandDirectories(
               string == null ? Depth.NONE : Depth.valueOf(string.toUpperCase()));
-
-        string = removeEntry(map, String.class, "delay_clear", "delay-clear", "delayClear");
-        request.setDelayClear(string == null ? 0 : Integer.parseInt(string));
 
         Object value = removeEntry(map, Object.class, "clear_on_success", "clear-on-success",
               "clearOnSuccess");
@@ -466,6 +484,30 @@ public final class BulkResources {
         }
 
         return request;
+    }
+
+    /*
+     *  These checks are for backward compatibility with Bulk 1 (version 7.2), which was,
+     *  unfortunately, ambiguously typed.  For Bulk 2 the practice should be to
+     *  specify the target as a JSON array.
+     */
+    private static List<String> extractTarget(Map map) {
+        Object target = map.remove("target");
+        if (target instanceof String) {
+            String stringTarget = (String)target;
+            stringTarget = stringTarget.replaceAll("\"", "")
+                  .replaceAll("[\\s]", "");
+            if (stringTarget.contains("[")) {
+                int open = stringTarget.indexOf("[");
+                int close = stringTarget.indexOf("]");
+                stringTarget = stringTarget.substring(open+1, close);
+            }
+            return Arrays.stream(stringTarget.split("[,]")).collect(Collectors.toList());
+        } else if (target instanceof String[]) {
+            return Arrays.stream(((String) target).split("[,]")).collect(Collectors.toList());
+        } else {
+            return (List<String>) target;
+        }
     }
 
     private static <T> T removeEntry(Map map, Class<T> clzz, String... names) {

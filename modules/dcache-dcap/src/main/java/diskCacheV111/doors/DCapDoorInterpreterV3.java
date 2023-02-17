@@ -1688,7 +1688,6 @@ public class DCapDoorInterpreterV3
         private String _truncFile;
         private boolean _poolRequestDone;
         private String _permission;
-        private boolean _passive;
         private String _accessLatency;
         private String _retentionPolicy;
         private PoolMgrSelectReadPoolMsg.Context _readPoolSelectionContext;
@@ -1703,19 +1702,7 @@ public class DCapDoorInterpreterV3
 
             StringTokenizer st = new StringTokenizer(_vargs.argv(2), ",");
 
-            _passive = args.hasOption("passive");
-            if (_passive) {
-                _clientSocketAddress = new InetSocketAddress(_clientAddress, port);
-            } else {
-                String hostname = st.nextToken();
-
-                _clientSocketAddress = new InetSocketAddress(hostname, port);
-
-                if (_clientSocketAddress.isUnresolved()) {
-                    _log.debug("Client sent unresolvable hostname {}", hostname);
-                    throw new CacheException("Unknown host: " + hostname);
-                }
-            }
+            _clientSocketAddress = new InetSocketAddress(_clientAddress, port);
 
             _protocolInfo = new DCapProtocolInfo("DCap", 3, 0, _clientSocketAddress);
             _protocolInfo.setSessionId(_sessionId);
@@ -1734,7 +1721,6 @@ public class DCapDoorInterpreterV3
             _truncFile = args.getOpt("truncate");
             _truncate = (_truncFile != null) && _settings.isTruncateAllowed();
 
-            _protocolInfo.isPassive(_passive);
             _accessLatency = args.getOpt("access-latency");
             _retentionPolicy = args.getOpt("retention-policy");
 
@@ -2075,6 +2061,12 @@ public class DCapDoorInterpreterV3
                     _log.error("Pool selection failed: permission denied: {}", error);
                     sendReply("poolMgrGetPoolArrived", 33, "Permission denied.",
                           "EPERM", "Permission denied: " + error);
+                    removeUs();
+                    return;
+                case CacheException.INVALID_ARGS:
+                    _log.error("Pool selection failed: invalid configuration: {}", error);
+                    sendReply("poolMgrGetPoolArrived", 33, "Invalid argument: " + error,
+                          "EINVAL", "Invalid argument: " + error);
                     removeUs();
                     return;
                 case CacheException.OUT_OF_DATE:

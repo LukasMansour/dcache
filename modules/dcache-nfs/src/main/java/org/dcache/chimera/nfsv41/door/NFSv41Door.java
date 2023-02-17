@@ -8,12 +8,14 @@ import static org.dcache.util.TransferRetryPolicy.alwaysRetry;
 
 import com.google.common.collect.Sets;
 import com.google.common.io.BaseEncoding;
+import com.google.common.net.InetAddresses;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import diskCacheV111.namespace.EventNotifier;
 import diskCacheV111.util.CacheException;
 import diskCacheV111.util.FileNotFoundCacheException;
 import diskCacheV111.util.FileNotInCacheException;
+import diskCacheV111.util.FsPath;
 import diskCacheV111.util.PermissionDeniedCacheException;
 import diskCacheV111.util.PnfsHandler;
 import diskCacheV111.util.PnfsId;
@@ -44,6 +46,7 @@ import java.io.Serializable;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
@@ -97,6 +100,7 @@ import org.dcache.nfs.ExportFile;
 import org.dcache.nfs.FsExport;
 import org.dcache.nfs.InetAddressMatcher;
 import org.dcache.nfs.nfsstat;
+import org.dcache.nfs.status.BadHandleException;
 import org.dcache.nfs.status.BadLayoutException;
 import org.dcache.nfs.status.BadStateidException;
 import org.dcache.nfs.status.DelayException;
@@ -471,7 +475,7 @@ public class NFSv41Door extends AbstractCellComponent implements
                           "state-handler-id");
 
                     NFSv4StateHandler stateHandler = new NFSv4StateHandler(
-                          NFSv4Defaults.NFS4_LEASE_TIME,
+                          Duration.ofSeconds(NFSv4Defaults.NFS4_LEASE_TIME),
                           stateHandlerId,
                           _clientStore);
 
@@ -840,21 +844,28 @@ public class NFSv41Door extends AbstractCellComponent implements
     private void logLayoutErrors(CompoundContext context, ff_layoutreturn4 lr) {
         for (ff_ioerr4 ioerr : lr.fflr_ioerr_report) {
             for (device_error4 de : ioerr.ffie_errors) {
-                PoolDS ds = _poolDeviceMap.getByDeviceId(de.de_deviceid);
-                String pool = ds == null ? "an unknown pool" : ("pool " + ds.getName());
-                _log.error("Client {} reports error {} on {} for op {}", toAddrString(context.getRemoteSocketAddress().getAddress()),
-                      nfsstat.toString(de.de_status), pool, nfs_opnum4.toString(de.de_opnum));
-
-                // rise an alarm when client can't connect to the pool
-                if (de.de_status == nfsstat.NFSERR_NXIO) {
-                    _log.error(
-                          AlarmMarkerFactory.getMarker(PredefinedAlarm.CLIENT_CONNECTION_REJECTED,
-                                pool),
-                          "Client {} failed to connect to {}", toAddrString(context.getRemoteSocketAddress().getAddress()), pool);
-                }
+                reportLayoutError(context, de);
             }
         }
     }
+
+    private void reportLayoutError(CompoundContext context, device_error4 de) {
+        PoolDS ds = _poolDeviceMap.getByDeviceId(de.de_deviceid);
+        String pool = ds == null ? "an unknown pool" : ("pool " + ds.getName());
+        _log.error("Client {} reports error {} on {} for op {}", toAddrString(
+                    context.getRemoteSocketAddress().getAddress()),
+              nfsstat.toString(de.de_status), pool, nfs_opnum4.toString(de.de_opnum));
+
+        // rise an alarm when client can't connect to the pool
+        if (de.de_status == nfsstat.NFSERR_NXIO) {
+            _log.error(
+                  AlarmMarkerFactory.getMarker(PredefinedAlarm.CLIENT_CONNECTION_REJECTED,
+                        pool),
+                  "Client {} failed to connect to {}", toAddrString(
+                        context.getRemoteSocketAddress().getAddress()), pool);
+        }
+    }
+
 
     /*
      * (non-Javadoc)
@@ -926,7 +937,9 @@ public class NFSv41Door extends AbstractCellComponent implements
 
     @Override
     public void layoutError(CompoundContext context, LAYOUTERROR4args args) throws IOException {
-        // NOP for now. Forced by interface
+        var errors = args.lea_errors;
+        Arrays.stream(errors)
+              .forEach(e -> reportLayoutError(context, e));
     }
 
     @Override
@@ -1198,6 +1211,38 @@ public class NFSv41Door extends AbstractCellComponent implements
         }
     }
 
+    @Command(name = "show open files", hint = "show all opened files",
+          description = "Show open files and corresponding NFS client IPs. Not every open"
+                + " has a layout (mover).")
+    public class ShowOpenFilesCmd implements Callable<String> {
+
+        @Override
+        public String call() throws IOException {
+
+            StringBuilder sb = new StringBuilder("Open files:").append("\n\n");
+            _nfs4.getStateHandler().getFileTracker()
+                  .getOpenFiles()
+                  .forEach((i, l) -> {
+                      try {
+                          FsInode inode = _chimeraVfs.inodeFromBytes(i.getFileId());
+                          PnfsId pnfsId = new PnfsId(inode.getId());
+                          FsPath p = _pnfsHandler.getPathByPnfsId(pnfsId);
+                          sb.append(pnfsId).append(" (").append(p).append("):").append("\n");
+                          l.forEach(c -> sb.append("  ")
+                                .append(c.getId()).append(" (")
+                                .append(
+                                      InetAddresses.toUriString(c.getRemoteAddress().getAddress()))
+                                .append(":").append(c.getRemoteAddress().getPort())
+                                .append(")")
+                                .append("\n\n"));
+                      } catch (BadHandleException | CacheException | ChimeraFsException e) {
+                          sb.append("Error: ").append(e);
+                      }
+                  });
+
+            return sb.toString();
+        }
+    }
     @Command(name = "show proxyio", hint = "show proxy-io transfers",
           description = "Show active proxy-io transfers.")
     public class ShowProxyIoTransfersCmd implements Callable<String> {

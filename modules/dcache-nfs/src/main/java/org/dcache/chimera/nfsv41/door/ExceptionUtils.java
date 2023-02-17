@@ -5,6 +5,7 @@ import static diskCacheV111.util.CacheException.ERROR_IO_DISK;
 import static diskCacheV111.util.CacheException.FILE_CORRUPTED;
 import static diskCacheV111.util.CacheException.FILE_IN_CACHE;
 import static diskCacheV111.util.CacheException.FILE_NOT_FOUND;
+import static diskCacheV111.util.CacheException.INVALID_ARGS;
 import static diskCacheV111.util.CacheException.NO_POOL_CONFIGURED;
 import static diskCacheV111.util.CacheException.NO_POOL_ONLINE;
 import static diskCacheV111.util.CacheException.PERMISSION_DENIED;
@@ -19,12 +20,12 @@ import java.util.concurrent.TimeoutException;
 import org.dcache.chimera.ChimeraFsException;
 import org.dcache.chimera.FileNotFoundChimeraFsException;
 import org.dcache.nfs.ChimeraNFSException;
+import org.dcache.nfs.status.AccessException;
 import org.dcache.nfs.status.DelayException;
 import org.dcache.nfs.status.LayoutTryLaterException;
 import org.dcache.nfs.status.NfsIoException;
 import org.dcache.nfs.status.NoEntException;
 import org.dcache.nfs.status.NoSpcException;
-import org.dcache.nfs.status.PermException;
 import org.dcache.nfs.status.ServerFaultException;
 
 /**
@@ -74,13 +75,14 @@ public class ExceptionUtils {
             case ERROR_IO_DISK:
             case FILE_IN_CACHE:
             case FILE_CORRUPTED:
+            case INVALID_ARGS:
                 return new NfsIoException(e.getMessage(), e);
             case FILE_NOT_FOUND:
                 return new NoEntException(e.getMessage(), e);
             case NO_POOL_ONLINE:
                 return new LayoutTryLaterException(e.getMessage(), e);
             case PERMISSION_DENIED:
-                return new PermException(e.getMessage(), e);
+                return new AccessException(e.getMessage(), e);
             case NO_POOL_CONFIGURED:
             case RESOURCE:
                 return new NoSpcException(e.getMessage(), e);

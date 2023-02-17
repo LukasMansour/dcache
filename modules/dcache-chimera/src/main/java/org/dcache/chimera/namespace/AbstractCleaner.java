@@ -1,7 +1,7 @@
 /*
  * dCache - http://www.dcache.org/
  *
- * Copyright (C) 2017 - 2020 Deutsches Elektronen-Synchrotron
+ * Copyright (C) 2017 - 2022 Deutsches Elektronen-Synchrotron
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -18,9 +18,15 @@
  */
 package org.dcache.chimera.namespace;
 
-import dmg.cells.nucleus.CellPath;
+import static dmg.util.CommandException.checkCommand;
+import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.dcache.cells.HAServiceLeadershipManager.HA_NOT_LEADER_MSG;
+
+import dmg.util.CommandException;
+import dmg.util.command.Argument;
+import dmg.util.command.Command;
 import java.time.Duration;
-import java.util.Arrays;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -38,7 +44,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
  */
 public abstract class AbstractCleaner implements LeaderLatchListener {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(DiskCleaner.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(AbstractCleaner.class);
 
     protected ScheduledThreadPoolExecutor _executor;
     private ScheduledFuture<?> _cleanerTask;
@@ -54,12 +60,11 @@ public abstract class AbstractCleaner implements LeaderLatchListener {
      */
     protected PoolInformationBase _pools;
     protected JdbcTemplate _db;
-    protected CellPath[] _deleteNotificationTargets;
     protected long _refreshInterval;
     protected TimeUnit _refreshIntervalUnit;
 
     /**
-     * Time period that cleaner have to wait before deleted file is removed by cleaner.
+     * Time period that cleaner has to wait before a deleted file is removed by cleaner.
      */
     protected Duration _gracePeriod;
 
@@ -87,14 +92,6 @@ public abstract class AbstractCleaner implements LeaderLatchListener {
     }
 
     @Required
-    public void setReportRemove(String[] reportRemove) {
-        _deleteNotificationTargets = Arrays.stream(reportRemove)
-              .filter(t -> !t.isEmpty())
-              .map(CellPath::new)
-              .toArray(CellPath[]::new);
-    }
-
-    @Required
     public void setRefreshInterval(long refreshInterval) {
         _refreshInterval = refreshInterval;
     }
@@ -107,6 +104,42 @@ public abstract class AbstractCleaner implements LeaderLatchListener {
     @Required
     public void setGracePeriod(Duration gracePeriod) {
         _gracePeriod = gracePeriod;
+    }
+
+    @Command(name = "set refresh",
+          hint = "Alters refresh rate and triggers a new run. Minimum rate is every 5 seconds." +
+                "If no time is provided, the old one is kept.")
+    public class SetRefreshCommand implements Callable<String> {
+
+        @Argument(required = false, usage = "refresh time in seconds")
+        Long refreshInterval;
+
+        @Override
+        public String call() throws CommandException {
+            checkCommand(_hasHaLeadership, HA_NOT_LEADER_MSG);
+            if (refreshInterval == null) {
+                return "Refresh interval unchanged: " + _refreshInterval + " "
+                      + _refreshIntervalUnit;
+            }
+            if (refreshInterval < 5) {
+                throw new IllegalArgumentException("Time must be greater than 5 seconds");
+            }
+
+            setRefreshInterval(refreshInterval);
+            setRefreshIntervalUnit(SECONDS);
+
+            if (_cleanerTask != null) {
+                _cleanerTask.cancel(true);
+            }
+            _cleanerTask = _executor.scheduleWithFixedDelay(() -> {
+                try {
+                    runDelete();
+                } catch (InterruptedException e) {
+                    LOGGER.info("Cleaner was interrupted");
+                }
+            }, _refreshInterval, _refreshInterval, _refreshIntervalUnit);
+            return "Refresh set to " + _refreshInterval + " " + _refreshIntervalUnit;
+        }
     }
 
     protected abstract void runDelete() throws InterruptedException;
@@ -134,13 +167,13 @@ public abstract class AbstractCleaner implements LeaderLatchListener {
     }
 
     @Override
-    public void isLeader() {
+    public synchronized void isLeader() {
         _hasHaLeadership = true;
         scheduleCleanerTask();
     }
 
     @Override
-    public void notLeader() {
+    public synchronized void notLeader() {
         _hasHaLeadership = false;
         cancelCleanerTask();
     }

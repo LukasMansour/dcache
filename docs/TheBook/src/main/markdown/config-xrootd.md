@@ -546,6 +546,14 @@ stay tuned for further developments in those areas.
 >practical to make the pools require TLS by setting
 >``pool.mover.xrootd.security.tls.mode=STRICT``.
 
+> **Host cert and key**
+>
+> These are required to be there when the SSHHandlerFactory (which provides
+> TLS support) is loaded at startup.  If either pool.mover.xrootd.security.tls.mode
+> or xrootd.security.tls.mode is set to either OPTIONAL or STRICT, the host cert
+> and key will be required, or the domain will not start.  You can start pools or
+> doors without a host cert/key by setting these properties to OFF.
+
 ###  Multiple authentication protocol chaining and defaults
 
 As of 8.1, dCache now supports the chaining of authentication plugins/protocols on the door.
@@ -555,23 +563,25 @@ The defaults have been modified so that dCache can be used out of the box in mos
 without further concern to configure doors and pools.   To summarize, for the door:
 
 ```
-xrootd.plugins=gplazma:gsi,gplazma:ztn,gplazma:none,authz:scitokens
+xrootd.plugins=gplazma:ztn,gplazma:gsi,gplazma:none,authz:scitokens
 xrootd.security.tls.mode=OPTIONAL
 xrootd.plugin!scitokens.strict=false
 ```
 
 These defaults guarantee that the client
 
-1. will try GSI without TLS first if it has a certificate;
-2. if it tries ZTN it must turn on/request TLS or that protocol will be rejected (xroots:// must be used)
-3. if those fail, it can be logged in anonymously and potentially receive further authorization
+1. will try ZTN first, because if it has no discoverable cert keys and no proxy,
+   the client will fail a GSI request unless `export XrdSecGSICREATEPROXY=0` is set;
+2. will then try GSI if it has no token;
+3. if it tries ZTN it must turn on/request TLS or that protocol will be rejected (xroots:// must be used)
+4. if those fail, it can be logged in anonymously and potentially receive further authorization
    downstream from another token;
-4. if ZTN succeeds and there is no authorization token on the path URL, the ZTN token
+5. if ZTN succeeds and there is no authorization token on the path URL, the ZTN token
    will be used as fallback (the scitoken requirement is not strict);
-5. third-party-copy will succeed with dCache doors as sources because the third-party
+6. third-party-copy will succeed with dCache doors as sources because the third-party
    client can connect using the rendezvous token without further authentication
    (gplazma:none).
-6. NOTE:  it is possible to use GSI rather than ZTN and als provide a scitoken/JWT token on the path
+7. NOTE:  it is possible to use GSI rather than ZTN and als provide a scitoken/JWT token on the path
    URL; TLS must be activated in this case.  The usage scenario for this would, however, be rare.
 
 Of course, these remain configurable in case of special requirements.
@@ -673,6 +683,22 @@ xrootd.net.proxy.response-timeout-in-secs=30
 > solution to this conundrum, so you are advised to be aware that when
 > proxying is on, such partitioning may be defeated for transfers that go
 > through that specific door.
+
+> BEST PRACTICE:  Memory consumption (Java direct memory, not heap) for a proxied
+> door is somewhat higher than normal, since it not only has double the connections
+> from the outside (one for the initial request, the second for the redirect to
+> the proxy), but must also sustain the passage of data packets through it
+> (and on to the pool).  For the default chunk size used for xrootd (8 MiB),
+> there seems to be required approximately 28MiB  of direct memory per transfer.
+> Hence the dCache default (512MiB) will very likely be insufficient.  This needs
+> to be adjusted according to expected traffic, but keep in mind that something
+> like 500 _concurrent_ transfers through the proxy door would require
+> setting it to at least 16GiB on the door domain, e.g.:
+
+```
+[xrootd-1095-${host.name}Domain]
+dcache.java.memory.direct=16384m
+```
 
 ### Other configuration options
 

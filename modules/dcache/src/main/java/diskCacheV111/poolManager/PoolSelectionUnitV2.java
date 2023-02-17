@@ -6,15 +6,22 @@ import static diskCacheV111.poolManager.PoolSelectionUnit.UnitType.PROTOCOL;
 import static diskCacheV111.poolManager.PoolSelectionUnit.UnitType.STORE;
 import static java.util.Comparator.comparing;
 import static java.util.Objects.requireNonNull;
+import static org.dcache.namespace.FileAttribute.CACHECLASS;
+import static org.dcache.namespace.FileAttribute.HSM;
+import static org.dcache.namespace.FileAttribute.STORAGECLASS;
 
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicates;
 import com.google.common.base.Splitter;
+import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.google.common.collect.Streams;
 import diskCacheV111.pools.PoolV2Mode;
+import diskCacheV111.util.PnfsHandler;
+import diskCacheV111.util.PnfsId;
 import diskCacheV111.vehicles.GenericStorageInfo;
 import diskCacheV111.vehicles.StorageInfo;
 import dmg.cells.nucleus.CellAddressCore;
@@ -51,6 +58,7 @@ import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import org.dcache.namespace.FileAttribute;
 import org.dcache.util.Args;
 import org.dcache.util.Glob;
 import org.dcache.vehicles.FileAttributes;
@@ -64,6 +72,13 @@ public class PoolSelectionUnitV2
     private static final String __version = "$Id: PoolSelectionUnitV2.java,v 1.42 2007-10-25 14:03:54 tigran Exp $";
     private static final Logger LOGGER = LoggerFactory.getLogger(PoolSelectionUnitV2.class);
     private static final String NO_NET = "<no net>";
+    private static final Set<FileAttribute> STORAGE_INFO = Set.of(FileAttribute.CACHECLASS,
+          FileAttribute.STORAGECLASS, FileAttribute.HSM, FileAttribute.OWNER,
+          FileAttribute.OWNER_GROUP);
+
+    private static final String DEFAULT_PROTOCOL_UNIT = "*/*";
+    private static final String DEFAULT_IPV4_NET_UNIT = "0.0.0.0/0.0.0.0";
+    private static final String DEFAULT_IPV6_NET_UNIT = "::/0";
 
     @Override
     public String getVersion() {
@@ -93,6 +108,8 @@ public class PoolSelectionUnitV2
     private final Lock _psuWriteLock = _psuReadWriteLock.writeLock();
 
     private final NetHandler _netHandler = new NetHandler();
+
+    private transient PnfsHandler _pnfsHandler;
 
     @Override
     public Map<String, SelectionLink> getLinks() {
@@ -288,13 +305,13 @@ public class PoolSelectionUnitV2
                       pw.println();
                   });
             pw.println();
+
             _pGroups.values().stream().sorted(comparing(PGroup::getName)).forEachOrdered(
                   group -> {
                       pw.append("psu create pgroup ").append(group.getName());
                       if (group.isPrimary()) {
                           pw.append(" -resilient");
                       }
-
                       // don't explicitly add pools into dynamic pool groups
                       if (group instanceof DynamicPGroup) {
                           pw.append(" -dynamic");
@@ -313,8 +330,27 @@ public class PoolSelectionUnitV2
                                             .append(group.getName())
                                             .append(" ")
                                             .println(pool.getName())
+
                                 );
                       }
+
+                      pw.println();
+                  });
+            //nested -pools
+            _pGroups.values().stream().sorted(comparing(PGroup::getName)).forEachOrdered(
+                  group -> {
+                      pw.println();
+                      group._pgroupList.stream().sorted(comparing(PGroup::getName))
+                            .forEachOrdered(
+                                  groupS -> {pw
+                                            .append("psu addto pgroup ")
+                                            .append(group.getName())
+                                            .append(" ")
+                                            .println("@" + groupS.getName());
+                                      LOGGER.info(groupS.getName() + " " + group.getName());
+                                  }
+                            );
+
                       pw.println();
                   });
             _links.values().stream().sorted(comparing(Link::getName)).forEachOrdered(
@@ -563,16 +599,47 @@ public class PoolSelectionUnitV2
         return linkMap;
     }
 
+    /**
+     * Matches using logical AND.
+     * <p>
+     * The AND is only valid if we have at least as many units (from the arguments) as required by
+     * the number of uGroupList(s).
+     *
+     * @param type             of I/O direction
+     * @param netUnitName      IP address/hostname or <code>null</code> (= default)
+     * @param protocolUnitName of the form name/version, or <code>null</code> (= default)
+     * @param fileAttributes   with minimally storage info defined
+     * @param linkGroupName    can be <code>null</code>
+     * @param exclude          for matching excluded hosts
+     * @return array of pools sorted by preference level
+     */
     @Override
     public PoolPreferenceLevel[] match(DirectionType type, String netUnitName,
           String protocolUnitName,
           FileAttributes fileAttributes, String linkGroupName, Predicate<String> exclude) {
-        requireNonNull(exclude,
-              "Predicate argument cannot be null.");
+        requireNonNull(exclude, "Predicate argument cannot be null.");
 
         StorageInfo storageInfo = fileAttributes.getStorageInfo();
-        String storeUnitName = storageInfo.getStorageClass() + "@" + storageInfo.getHsm();
+        String storageClass = storageInfo.getStorageClass();
+        String hsm = storageInfo.getHsm();
         String dCacheUnitName = storageInfo.getCacheClass();
+
+        /*
+         *  The preference level build requires these to be present in the file attributes.
+         */
+        if (fileAttributes.isUndefined(STORAGECLASS)) {
+            fileAttributes.setStorageClass(storageClass);
+        }
+
+        if (fileAttributes.isUndefined(HSM)) {
+            fileAttributes.setHsm(hsm);
+        }
+
+        if (fileAttributes.isUndefined(CACHECLASS)) {
+            fileAttributes.setCacheClass(dCacheUnitName);
+        }
+
+        String storeUnitName = storageClass + "@" + hsm;
 
         Map<String, String> variableMap = storageInfo.getMap();
 
@@ -584,237 +651,273 @@ public class PoolSelectionUnitV2
         PoolPreferenceLevel[] result = null;
         rlock();
         try {
-            //
-            // resolve the unit from the unitname (or net unit mask)
-            //
-            // regexp code added by rw2 12/5/02
-            // original code is in the else
-            //
-            List<Unit> list = new ArrayList<>();
-            if (_useRegex) {
-                Unit universalCoverage = null;
-                Unit classCoverage = null;
+            List<Unit> units = new ArrayList<>();
 
-                for (Unit unit : _units.values()) {
-                    if (unit.getType() != STORE) {
-                        continue;
+            resolveStorageUnit(units, storeUnitName);
+            addProtocolUnit(units, protocolUnitName);
+            addDCacheUnit(units, dCacheUnitName);
+            addNetUnit(units, netUnitName);
+
+            LinkGroup linkGroup = resolveLinkGroup(linkGroupName);
+            Set<Link> sortedSet = findMatchingLinks(units, linkGroup, type);
+
+            List<List<Link>> linkLists = matchPreferences(type, sortedSet);
+            result = buildPreferenceLevels(type, linkLists, fileAttributes, exclude);
+        } finally {
+            runlock();
+        }
+
+        if (LOGGER.isDebugEnabled()) {
+            logResult(result);
+        }
+
+        return result;
+    }
+
+    private void resolveStorageUnit(List<Unit> list, String storeUnitName) {
+        if (_useRegex) {
+            Unit universalCoverage = null;
+            Unit classCoverage = null;
+
+            for (Unit unit : _units.values()) {
+                if (unit.getType() != STORE) {
+                    continue;
+                }
+
+                if (unit.getName().equals("*@*")) {
+                    universalCoverage = unit;
+                } else if (unit.getName().equals("*@" + storeUnitName)) {
+                    classCoverage = unit;
+                } else {
+                    if (Pattern.matches(unit.getName(), storeUnitName)) {
+                        list.add(unit);
+                        break;
                     }
+                }
+            }
 
-                    if (unit.getName().equals("*@*")) {
-                        universalCoverage = unit;
-                    } else if (unit.getName().equals("*@" + storeUnitName)) {
-                        classCoverage = unit;
-                    } else {
-                        if (Pattern.matches(unit.getName(), storeUnitName)) {
-                            list.add(unit);
-                            break;
+            if (list.isEmpty()) {
+                if (classCoverage != null) {
+                    list.add(classCoverage);
+                } else if (universalCoverage != null) {
+                    list.add(universalCoverage);
+                } else {
+                    throw new IllegalArgumentException(
+                          "Unit not found : " + storeUnitName);
+                }
+            }
+        } else {
+            Unit unit = _units.get(storeUnitName);
+            if (unit == null) {
+                int ind = storeUnitName.lastIndexOf('@');
+                if ((ind > 0) && (ind < (storeUnitName.length() - 1))) {
+                    String template = "*@"
+                          + storeUnitName.substring(ind + 1);
+                    if ((unit = _units.get(template)) == null) {
+
+                        if ((unit = _units.get("*@*")) == null) {
+                            LOGGER.debug("no matching storage unit found for: {}",
+                                  storeUnitName);
+                            throw new IllegalArgumentException(
+                                  "Unit not found : " + storeUnitName);
                         }
                     }
+                } else {
+                    throw new IllegalArgumentException(
+                          "IllegalUnitFormat : " + storeUnitName);
                 }
-                //
-                // If a pattern matches then use it, fail over to a class,
-                // then universal. If nothing, throw exception
-                //
-                if (list.isEmpty()) {
-                    if (classCoverage != null) {
-                        list.add(classCoverage);
-                    } else if (universalCoverage != null) {
-                        list.add(universalCoverage);
-                    } else {
-                        throw new IllegalArgumentException(
-                              "Unit not found : " + storeUnitName);
-                    }
+            }
+
+            LOGGER.debug("matching storage unit found for: {}", storeUnitName);
+            list.add(unit);
+        }
+    }
+
+    private void addProtocolUnit(List<Unit> list, String protocolUnitName) {
+        if (protocolUnitName != null) {
+            Unit unit = findProtocolUnit(protocolUnitName);
+            if (unit == null) {
+                LOGGER.debug("no matching protocol unit found for: {}", protocolUnitName);
+                /* for backward compatibility, do not throw exception */
+                return;
+            }
+
+            LOGGER.debug("matching protocol unit found: {}", unit);
+            list.add(unit);
+        }
+    }
+
+    private void addDCacheUnit(List<Unit> list, String dCacheUnitName) {
+        if (dCacheUnitName != null) {
+            Unit unit = _units.get(dCacheUnitName);
+
+            if (unit == null || unit.getType() != DCACHE) {
+                LOGGER.debug("no matching dCache unit found for: {}", dCacheUnitName);
+                throw new IllegalArgumentException("Unit not found : "
+                      + dCacheUnitName);
+            }
+
+            LOGGER.debug("matching dCache unit found: {}", unit);
+            list.add(unit);
+        }
+    }
+
+    private void addNetUnit(List<Unit> list, String netUnitName) {
+        if (netUnitName != null) {
+            try {
+                Unit unit;
+                if (DEFAULT_IPV4_NET_UNIT.equals(netUnitName)
+                      || DEFAULT_IPV6_NET_UNIT.equals(netUnitName)) {
+                    unit = _units.get(netUnitName);
+                } else {
+                    unit = _netHandler.match(netUnitName);
                 }
 
-            } else {
-                Unit unit = _units.get(storeUnitName);
                 if (unit == null) {
-                    int ind = storeUnitName.lastIndexOf('@');
-                    if ((ind > 0) && (ind < (storeUnitName.length() - 1))) {
-                        String template = "*@"
-                              + storeUnitName.substring(ind + 1);
-                        if ((unit = _units.get(template)) == null) {
+                    LOGGER.debug("no matching net unit found for: {}", netUnitName);
+                    /* for backward compatibility, do not throw exception */
+                    return;
+                }
 
-                            if ((unit = _units.get("*@*")) == null) {
-                                LOGGER.debug("no matching storage unit found for: {}",
-                                      storeUnitName);
-                                throw new IllegalArgumentException(
-                                      "Unit not found : " + storeUnitName);
+                LOGGER.debug("matching net unit found: {}", unit);
+                list.add(unit);
+            } catch (UnknownHostException uhe) {
+                throw new IllegalArgumentException(
+                      "NetUnit not resolved : " + netUnitName);
+            }
+        }
+    }
+
+    private LinkGroup resolveLinkGroup(String linkGroupName) {
+        LinkGroup linkGroup = null;
+        if (linkGroupName != null) {
+            linkGroup = _linkGroups.get(linkGroupName);
+            if (linkGroup == null) {
+                LOGGER.debug("LinkGroup not found : {}", linkGroupName);
+                throw new IllegalArgumentException("LinkGroup not found : "
+                      + linkGroupName);
+            }
+        }
+        return linkGroup;
+    }
+
+    private Set<Link> findMatchingLinks(List<Unit> units, LinkGroup linkGroup,
+          DirectionType type) {
+        Set<Link> sortedSet = new TreeSet<>(new LinkComparator(type));
+        LinkMap matchingLinks = new LinkMap();
+        int fitCount = units.size();
+        for (Unit unit : units) {
+            matchingLinks = match(matchingLinks, unit, linkGroup, type);
+        }
+
+        Iterator<Link> linkIterator = matchingLinks.iterator();
+        while (linkIterator.hasNext()) {
+            Link link = linkIterator.next();
+            if (link._uGroupList.size() <= fitCount) {
+                sortedSet.add(link);
+            }
+        }
+
+        return sortedSet;
+    }
+
+    private List<List<Link>> matchPreferences(DirectionType type, Set<Link> sortedSet) {
+        int pref = -1;
+        List<List<Link>> linkLists = new ArrayList<>();
+        List<Link> currentList = null;
+
+        switch (type) {
+            case READ:
+                for (Link link : sortedSet) {
+                    if (link.getReadPref() < 1) {
+                        continue;
+                    }
+                    if (link.getReadPref() != pref) {
+                        linkLists.add(currentList = new ArrayList<>());
+                        pref = link.getReadPref();
+                    }
+                    currentList.add(link);
+                }
+                break;
+            case CACHE:
+                for (Link link : sortedSet) {
+                    if (link.getCachePref() < 1) {
+                        continue;
+                    }
+                    if (link.getCachePref() != pref) {
+                        linkLists.add(currentList = new ArrayList<>());
+                        pref = link.getCachePref();
+                    }
+                    currentList.add(link);
+                }
+                break;
+            case P2P:
+                for (Link link : sortedSet) {
+                    int tmpPref = link.getP2pPref() < 0 ? link.getReadPref()
+                          : link.getP2pPref();
+                    if (tmpPref < 1) {
+                        continue;
+                    }
+                    if (tmpPref != pref) {
+                        linkLists.add(currentList = new ArrayList<>());
+                        pref = tmpPref;
+                    }
+                    currentList.add(link);
+                }
+                break;
+            case WRITE:
+                for (Link link : sortedSet) {
+                    if (link.getWritePref() < 1) {
+                        continue;
+                    }
+                    if (link.getWritePref() != pref) {
+                        linkLists.add(currentList = new ArrayList<>());
+                        pref = link.getWritePref();
+                    }
+                    currentList.add(link);
+                }
+        }
+
+        return linkLists;
+    }
+
+    private PoolPreferenceLevel[] buildPreferenceLevels(DirectionType type,
+          List<List<Link>> linkLists, FileAttributes fileAttributes, Predicate<String> exclude) {
+        List<Link>[] linkListsArray = linkLists.toArray(List[]::new);
+        PoolPreferenceLevel[] result = new PoolPreferenceLevel[linkListsArray.length];
+
+        for (int i = 0; i < linkListsArray.length; i++) {
+            List<Link> linkList = linkListsArray[i];
+            List<String> resultList = new ArrayList<>();
+            String tag = null;
+
+            for (Link link : linkList) {
+                if ((tag == null) && (link.getTag() != null)) {
+                    tag = link.getTag();
+                }
+
+                for (PoolCore poolCore : link._poolList.values()) {
+                    if (poolCore instanceof Pool) {
+                        Pool pool = (Pool) poolCore;
+                        LOGGER.debug("Pool: {} can read from tape? : {}", pool,
+                              pool.canReadFromTape());
+                        if (((type == DirectionType.READ && pool.canRead())
+                              || (type == DirectionType.CACHE && pool.canReadFromTape()
+                              && poolCanStageFile(pool, fileAttributes))
+                              || (type == DirectionType.WRITE && pool.canWrite())
+                              || (type == DirectionType.P2P && pool.canWriteForP2P()))
+                              && (_allPoolsActive || pool.isActive())) {
+                            if (exclude.test(pool.getName())) {
+                                LOGGER.debug(
+                                      "Qualifying pool {} is on excluded host {}; skipping.",
+                                      pool.getName(),
+                                      pool.getCanonicalHostName());
+                            } else {
+                                resultList.add(pool.getName());
                             }
                         }
                     } else {
-                        throw new IllegalArgumentException(
-                              "IllegalUnitFormat : " + storeUnitName);
-                    }
-                }
-                LOGGER.debug("matching storage unit found for: {}", storeUnitName);
-                list.add(unit);
-            }
-            if (protocolUnitName != null) {
-
-                Unit unit = findProtocolUnit(protocolUnitName);
-                //
-                if (unit == null) {
-                    LOGGER.debug("no matching protocol unit found for: {}", protocolUnitName);
-                    throw new IllegalArgumentException("Unit not found : "
-                          + protocolUnitName);
-                }
-                LOGGER.debug("matching protocol unit found: {}", unit);
-                list.add(unit);
-            }
-            if (dCacheUnitName != null) {
-                Unit unit = _units.get(dCacheUnitName);
-                if (unit == null) {
-                    LOGGER.debug("no matching dCache unit found for: {}", dCacheUnitName);
-                    throw new IllegalArgumentException("Unit not found : "
-                          + dCacheUnitName);
-                }
-                LOGGER.debug("matching dCache unit found: {}", unit);
-                list.add(unit);
-            }
-            if (netUnitName != null) {
-                try {
-                    Unit unit = _netHandler.match(netUnitName);
-                    if (unit == null) {
-                        LOGGER.debug("no matching net unit found for: {}", netUnitName);
-                        throw new IllegalArgumentException(
-                              "Unit not matched : " + netUnitName);
-                    }
-                    LOGGER.debug("matching net unit found: {}", unit);
-                    list.add(unit);
-                } catch (UnknownHostException uhe) {
-                    throw new IllegalArgumentException(
-                          "NetUnit not resolved : " + netUnitName);
-                }
-            }
-            //
-            // match the requests ( logical AND )
-            //
-            //
-            // Map map = null ;
-            // while( units.hasNext() )map = match( map , (Unit)units.next() ) ;
-            // Iterator links = map.values().iterator() ;
-            //
-
-            //
-            // i) sort according to the type (read,write,cache)
-            // ii) the and is only OK if we have at least as many
-            // units (from the arguments) as required by the
-            // number of uGroupList(s).
-            // iii) check for the hashtable if required.
-            //
-            int fitCount = list.size();
-            Set<Link> sortedSet = new TreeSet<>(new LinkComparator(type));
-
-            //
-            // use subset on links if it's defined
-            //
-
-            LinkGroup linkGroup = null;
-            if (linkGroupName != null) {
-                linkGroup = _linkGroups.get(linkGroupName);
-                if (linkGroup == null) {
-                    LOGGER.debug("LinkGroup not found : {}", linkGroupName);
-                    throw new IllegalArgumentException("LinkGroup not found : "
-                          + linkGroupName);
-                }
-            }
-
-            //
-            // find all links that matches the specified list of units
-            //
-
-            LinkMap matchingLinks = new LinkMap();
-            for (Unit unit : list) {
-                matchingLinks = match(matchingLinks, unit, linkGroup, type);
-            }
-
-            Iterator<Link> linkIterator = matchingLinks.iterator();
-            while (linkIterator.hasNext()) {
-
-                Link link = linkIterator.next();
-                if (link._uGroupList.size() <= fitCount) {
-                    sortedSet.add(link);
-                }
-            }
-            int pref = -1;
-            List<List<Link>> listList = new ArrayList<>();
-            List<Link> current = null;
-
-            switch (type) {
-
-                case READ:
-                    for (Link link : sortedSet) {
-                        if (link.getReadPref() < 1) {
-                            continue;
-                        }
-                        if (link.getReadPref() != pref) {
-                            listList.add(current = new ArrayList<>());
-                            pref = link.getReadPref();
-                        }
-                        current.add(link);
-                    }
-                    break;
-                case CACHE:
-                    for (Link link : sortedSet) {
-                        if (link.getCachePref() < 1) {
-                            continue;
-                        }
-                        if (link.getCachePref() != pref) {
-                            listList.add(current = new ArrayList<>());
-                            pref = link.getCachePref();
-                        }
-                        current.add(link);
-                    }
-                    break;
-                case P2P:
-                    for (Link link : sortedSet) {
-                        int tmpPref = link.getP2pPref() < 0 ? link.getReadPref()
-                              : link.getP2pPref();
-                        if (tmpPref < 1) {
-                            continue;
-                        }
-                        if (tmpPref != pref) {
-                            listList.add(current = new ArrayList<>());
-                            pref = tmpPref;
-                        }
-                        current.add(link);
-                    }
-                    break;
-                case WRITE:
-                    for (Link link : sortedSet) {
-                        if (link.getWritePref() < 1) {
-                            continue;
-                        }
-                        if (link.getWritePref() != pref) {
-                            listList.add(current = new ArrayList<>());
-                            pref = link.getWritePref();
-                        }
-                        current.add(link);
-                    }
-            }
-            List<Link>[] x = listList.toArray(List[]::new);
-            result = new PoolPreferenceLevel[x.length];
-            //
-            // resolve the links to the pools
-            //
-            for (int i = 0; i < x.length; i++) {
-
-                List<Link> linkList = x[i];
-                List<String> resultList = new ArrayList<>();
-                String tag = null;
-
-                for (Link link : linkList) {
-                    //
-                    // get the link if available
-                    //
-                    if ((tag == null) && (link.getTag() != null)) {
-                        tag = link.getTag();
-                    }
-
-                    for (PoolCore poolCore : link._poolList.values()) {
-                        if (poolCore instanceof Pool) {
-                            Pool pool = (Pool) poolCore;
+                        for (Pool pool : ((PGroup) poolCore)._poolList.values()) {
                             LOGGER.debug("Pool: {} can read from tape? : {}", pool,
                                   pool.canReadFromTape());
                             if (((type == DirectionType.READ && pool.canRead())
@@ -832,49 +935,43 @@ public class PoolSelectionUnitV2
                                     resultList.add(pool.getName());
                                 }
                             }
-                        } else {
-                            for (Pool pool : ((PGroup) poolCore)._poolList.values()) {
-                                LOGGER.debug("Pool: {} can read from tape? : {}", pool,
-                                      pool.canReadFromTape());
-                                if (((type == DirectionType.READ && pool.canRead())
-                                      || (type == DirectionType.CACHE && pool.canReadFromTape()
-                                      && poolCanStageFile(pool, fileAttributes))
-                                      || (type == DirectionType.WRITE && pool.canWrite())
-                                      || (type == DirectionType.P2P && pool.canWriteForP2P()))
-                                      && (_allPoolsActive || pool.isActive())) {
-                                    if (exclude.test(pool.getName())) {
-                                        LOGGER.debug(
-                                              "Qualifying pool {} is on excluded host {}; skipping.",
-                                              pool.getName(),
-                                              pool.getCanonicalHostName());
-                                    } else {
-                                        resultList.add(pool.getName());
-                                    }
-                                }
-                            }
                         }
                     }
                 }
-                result[i] = new PoolPreferenceLevel(resultList, tag);
             }
-
-        } finally {
-            runlock();
+            result[i] = new PoolPreferenceLevel(resultList, tag);
         }
 
-        if (LOGGER.isDebugEnabled()) {
-
-            StringBuilder sb = new StringBuilder("match done: ");
-
-            for (int i = 0; i < result.length; i++) {
-                sb.append("[").append(i).append("] :");
-                for (String poolName : result[i].getPoolList()) {
-                    sb.append(" ").append(poolName);
-                }
-            }
-            LOGGER.debug(sb.toString());
-        }
         return result;
+    }
+
+    private void logResult(PoolPreferenceLevel[] result) {
+        StringBuilder sb = new StringBuilder("match done: ");
+
+        for (int i = 0; i < result.length; i++) {
+            sb.append("[").append(i).append("] :");
+            for (String poolName : result[i].getPoolList()) {
+                sb.append(" ").append(poolName);
+            }
+        }
+
+        LOGGER.debug(sb.toString());
+    }
+
+    private String printPreferenceLevels(PoolPreferenceLevel[] list) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < list.length; i++) {
+            String tag = list[i].getTag();
+            sb.append("Preference : ").append(i).append("\n");
+            sb.append("       Tag : ").append(tag == null ? "NONE" : tag)
+                  .append("\n");
+            for (String s : list[i].getPoolList()) {
+                sb.append("  ").append(s)
+                      .append("\n");
+            }
+        }
+
+        return sb.toString();
     }
 
     @Override
@@ -940,6 +1037,17 @@ public class PoolSelectionUnitV2
             if (unit != null && unit.getType() == STORE) {
                 return (StorageUnit) unit;
             }
+
+            /*
+             *  If not found, and regex is on, try to resolve it.
+             */
+            if (_useRegex) {
+                List<Unit> units = new ArrayList<>();
+                resolveStorageUnit(units, storageClass);
+                if (!units.isEmpty()) {
+                    return (StorageUnit) units.iterator().next();
+                }
+            }
         } finally {
             _psuReadLock.unlock();
         }
@@ -956,7 +1064,8 @@ public class PoolSelectionUnitV2
             if (unit == null) {
                 return NO_NET;
             }
-            return unit.getCanonicalName();
+            return unit._uGroupList.isEmpty() ? unit.getName() :
+                  unit._uGroupList.keySet().stream().collect(Collectors.joining("-"));
         } finally {
             runlock();
         }
@@ -1042,36 +1151,11 @@ public class PoolSelectionUnitV2
         return unit.toString();
     }
 
-    public String matchLinkGroups(String linkGroup,
-          String direction,
-          String storeUnit,
-          String dCacheUnit,
-          String netUnit,
-          String protocolUnit) {
-        try {
-            long start = System.currentTimeMillis();
-            PoolPreferenceLevel[] list
-                  = matchLinkGroupsXml(linkGroup, direction,
-                  storeUnit, dCacheUnit, netUnit, protocolUnit);
-            start = System.currentTimeMillis() - start;
-
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < list.length; i++) {
-                String tag = list[i].getTag();
-                sb.append("Preference : ").append(i).append("\n");
-                sb.append("       Tag : ").append(tag == null ? "NONE" : tag)
-                      .append("\n");
-                for (String s : list[i].getPoolList()) {
-                    sb.append("  ").append(s)
-                          .append("\n");
-                }
-            }
-            sb.append("(time used : ").append(start).append(" millis)\n");
-            return sb.toString();
-        } catch (Exception ee) {
-            ee.printStackTrace();
-            throw ee;
-        }
+    public String matchLinkGroups(String linkGroup, String direction, String storeUnit,
+          String dCacheUnit, String netUnit, String protocolUnit) {
+        PoolPreferenceLevel[] list = matchLinkGroupsXml(linkGroup, direction, storeUnit, dCacheUnit,
+              netUnit, protocolUnit);
+        return printPreferenceLevels(list);
     }
 
     public String matchUnits(String netUnitName, ImmutableList<String> units) {
@@ -1087,7 +1171,6 @@ public class PoolSelectionUnitV2
                     throw new IllegalArgumentException("Unit not found : "
                           + unitName);
                 }
-                // TODO:
                 map = match(map, unit, DirectionType.READ);
             }
             if (netUnitName != null) {
@@ -1096,7 +1179,6 @@ public class PoolSelectionUnitV2
                     throw new IllegalArgumentException(
                           "Unit not found in netList : " + netUnitName);
                 }
-                // TODO:
                 map = match(map, unit, DirectionType.READ);
             }
             for (Link link : map.values()) {
@@ -1613,10 +1695,11 @@ public class PoolSelectionUnitV2
           String netUnit,
           String protocolUnit) {
         StorageInfo info = GenericStorageInfo.valueOf(storeUnit, dCacheUnit);
+        FileAttributes fileAttributes = FileAttributes.ofStorageInfo(info);
         return match(DirectionType.valueOf(direction.toUpperCase()),
-              netUnit.equals("*") ? null : netUnit,
-              protocolUnit.equals("*") ? null : protocolUnit,
-              FileAttributes.ofStorageInfo(info), linkGroup, p -> false);
+              netUnit.equals("*") ? DEFAULT_IPV6_NET_UNIT : netUnit,
+              protocolUnit.equals("*") ? DEFAULT_PROTOCOL_UNIT : protocolUnit,
+              fileAttributes, linkGroup, p -> false);
     }
 
     // ..................................................................
@@ -1689,6 +1772,7 @@ public class PoolSelectionUnitV2
                     group._poolList.values().stream().sorted(comparing(Pool::getName))
                           .forEachOrdered(
                                 pool -> sb.append("   ").append(pool.toString()).append("\n"));
+                    sb.append("nested groups  = ").append(group._pgroupList).append("\n") ;
                 }
             }
         } finally {
@@ -1785,22 +1869,15 @@ public class PoolSelectionUnitV2
 
         rlock();
         try {
-            for (int i = 0; i < _netHandler._netList.length; i++) {
-                Map<Long, NetUnit> map = _netHandler._netList[i];
-                if (map == null) {
-                    continue;
-                }
-                String stringMask = _netHandler.bitsToString(i);
-                sb.append(stringMask).append("/").append(i).append("\n");
-                for (NetUnit net : map.values()) {
-                    sb.append("   ").append(net.getHostAddress().getHostName());
-                    if (i > 0) {
-                        sb.append("/").append(stringMask);
-                    }
-                    sb.append("\n");
-                }
-
-            }
+            Streams.concat(_netHandler._netList.stream(), _netHandler._netListV6.stream())
+                  .forEach(u -> {
+                      sb.append(u.getHostAddress().getHostAddress());
+                      int mask = u.getMask();
+                      if (mask > 0) {
+                          sb.append('/').append(mask);
+                      }
+                      sb.append('\n');
+                  });
         } finally {
             runlock();
         }
@@ -2170,7 +2247,6 @@ public class PoolSelectionUnitV2
     //
 
     public void addToPoolGroup(String pGroupName, String poolName) {
-
         wlock();
         try {
             PGroup group = _pGroups.get(pGroupName);
@@ -2748,13 +2824,12 @@ public class PoolSelectionUnitV2
         return listUnits(more, detail, args.getArguments());
     }
 
-    public static final String hh_psu_match = "[-linkGroup=<link group>] "
-          + "read|cache|write|p2p <store unit>|* <store unit>|* "
-          + "<store unit>|* <protocol unit>|* ";
+    public static final String hh_psu_match = "[-linkGroup=<link group>] [-pnfsId=<pnfsid>] "
+          + "[-path=<path>] [-storageClass=<storage class>] [-hsm=<hsm>] [-cacheClass=<cache class>] "
+          + "read|cache|write|p2p <client host>|* <protocol>|* ";
 
-    public String ac_psu_match_$_5(Args args) throws Exception {
-        return matchLinkGroups(args.getOpt("linkGroup"), args.argv(0),
-              args.argv(1), args.argv(2), args.argv(3), args.argv(4));
+    public String ac_psu_match_$_3(Args args) throws Exception {
+        return printPreferenceLevels((PoolPreferenceLevel[]) ac_psux_match_$_3(args));
     }
 
     public static final String hh_psu_match2 = "<unit> [...] [-net=<net unit>}";
@@ -2966,6 +3041,10 @@ public class PoolSelectionUnitV2
         return setRegex(args.argv(0));
     }
 
+    public void setPnfsHandler(PnfsHandler pnfsHandler) {
+        _pnfsHandler = pnfsHandler;
+    }
+
     @AffectsSetup
     @Command(name = "psu set storage unit",
           hint = "define resilience requirements for a storage unit",
@@ -3065,14 +3144,59 @@ public class PoolSelectionUnitV2
         return listUnitGroupXml(groupName);
     }
 
-    public static final String hh_psux_match = "[-linkGroup=<link group>] "
-          + "read|cache|write <store unit>|* <store unit>|* "
-          + "<store unit>|* <protocol unit>|* ";
+    public static final String hh_psux_match = "[-linkGroup=<link group>] [-pnfsId=<pnfsid>] "
+          + "[-path=<path>] [-storageClass=<storage class>] [-hsm=<hsm>] [-cacheClass=<cache class>] "
+          + "read|cache|write|p2p <client host>|* <protocol>|* ";
 
-    public Object ac_psux_match_$_5(Args args) {
-        return matchLinkGroupsXml(args.getOpt("linkGroup"),
-              args.argv(0), args.argv(1), args.argv(2), args.argv(3),
-              args.argv(4));
+    public Object ac_psux_match_$_3(Args args)
+          throws Exception {
+        String linkGroup = args.getOpt("linkGroup");
+        String pnfsid = args.getOpt("pnfsId");
+        String path = args.getOpt("path");
+        String storageClass = args.getOpt("storageClass");
+        String hsm = args.getOpt("hsm");
+        String cacheClass = args.getOpt("cacheClass");
+        String direction = args.argv(0);
+        String netUnit = args.argv(1);
+        String protocolUnit = args.argv(2);
+
+        FileAttributes storageAttributes = null;
+
+        if (Strings.emptyToNull(pnfsid) != null) {
+            if (direction.equalsIgnoreCase("WRITE")) {
+                throw new CommandException("WRITE direction not allowed with -pnfsId.");
+            }
+            storageAttributes = _pnfsHandler.getFileAttributes(new PnfsId(pnfsid),
+                  STORAGE_INFO);
+        } else if (Strings.emptyToNull(path) != null) {
+            if (direction.equalsIgnoreCase("WRITE")) {
+                throw new CommandException("WRITE direction not allowed with -path.");
+            }
+            storageAttributes = _pnfsHandler.getFileAttributes(path, STORAGE_INFO);
+        }
+
+        if (storageAttributes != null) {
+            cacheClass = storageAttributes.getCacheClass();
+            storageClass = storageAttributes.getStorageClass();
+            hsm = storageAttributes.getHsm();
+        }
+
+        if (Strings.emptyToNull(storageClass) == null) {
+            throw new CommandException("storage class must be provided.");
+        }
+
+        if (Strings.emptyToNull(hsm) == null) {
+            throw new CommandException("hsm must be provided.");
+        }
+
+        if (cacheClass == null) {
+            cacheClass = "*";
+        }
+
+        String storageUnit = storageClass + "@" + hsm;
+
+        return matchLinkGroupsXml(linkGroup, direction, storageUnit, cacheClass, netUnit,
+              protocolUnit);
     }
 
     private void writeObject(ObjectOutputStream stream) throws IOException {

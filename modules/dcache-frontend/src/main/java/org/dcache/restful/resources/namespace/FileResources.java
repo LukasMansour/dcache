@@ -2,6 +2,7 @@ package org.dcache.restful.resources.namespace;
 
 import static org.dcache.restful.providers.SuccessfulResponse.successfulResponse;
 
+import com.google.common.base.Strings;
 import com.google.common.collect.Range;
 import diskCacheV111.util.AttributeExistsCacheException;
 import diskCacheV111.util.CacheException;
@@ -65,6 +66,7 @@ import org.dcache.namespace.FileType;
 import org.dcache.pinmanager.PinManagerPinMessage;
 import org.dcache.pinmanager.PinManagerUnpinMessage;
 import org.dcache.poolmanager.PoolMonitor;
+import org.dcache.qos.QoSTransitionEngine;
 import org.dcache.qos.data.FileQoSRequirements;
 import org.dcache.qos.remote.clients.RemoteQoSRequirementsClient;
 import org.dcache.restful.providers.JsonFileAttributes;
@@ -81,6 +83,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Required;
 import org.springframework.stereotype.Component;
 
 /**
@@ -126,6 +129,8 @@ public class FileResources {
     @Named("qos-engine")
     private CellStub qosEngine;
 
+    private boolean useQosService;
+
     @GET
     @ApiOperation(value = "Find metadata and optionally directory contents.",
           notes = "The method offers the possibility to list the content of a "
@@ -158,6 +163,9 @@ public class FileResources {
           @QueryParam("labels") boolean isLabels,
           @ApiParam("Whether or not to list checksum values.")
           @QueryParam("checksum") boolean isChecksum,
+          @ApiParam("Whether or not to print optional attributes")
+          @DefaultValue("false")
+	  @QueryParam("optional") boolean isOptional,
           @ApiParam("Limit number of replies in directory listing.")
           @QueryParam("limit") String limit,
           @ApiParam("Number of entries to skip in directory listing.")
@@ -168,7 +176,7 @@ public class FileResources {
                     isLocations,
                     isQos,
                     isChecksum,
-                    false);
+                    isOptional);
         PnfsHandler handler = HandlerBuilders.roleAwarePnfsHandler(pnfsmanager);
         FsPath path = pathMapper.asDcachePath(request, requestPath, ForbiddenException::new);
         try {
@@ -177,7 +185,7 @@ public class FileResources {
             NamespaceUtils.chimeraToJsonAttributes(path.name(), fileAttributes,
                   namespaceAttributes,
                   isLocality, isLocations, isLabels,
-                  false, isXattr, isChecksum,
+                  isOptional, isXattr, isChecksum,
                   request, poolMonitor);
             if (isQos) {
                 NamespaceUtils.addQoSAttributes(fileAttributes,
@@ -220,7 +228,7 @@ public class FileResources {
                           childrenAttributes,
                           entry.getFileAttributes(),
                           isLocality, isLocations, isLabels,
-                          false, isXattr, isChecksum,
+                          isOptional, isXattr, isChecksum,
                           request, poolMonitor);
                     childrenAttributes.setFileName(fName);
                     if (isQos) {
@@ -436,24 +444,34 @@ public class FileResources {
                     break;
                 case "qos":
                     String targetQos = reqPayload.getString("target");
-                    /*
-                     *  fire and forget, does not wait for transition to complete
-                     */
-                    FileAttributes attr
-                          = pnfsHandler.getFileAttributes(path.toString(),
-                          NamespaceUtils.getRequestedAttributes(false, false,
-                                true, false, false));
-                    FileQoSRequirements requirements = getBasicRequirements(targetQos, attr);
-                    RemoteQoSRequirementsClient client = new RemoteQoSRequirementsClient();
-                    client.setRequirementsService(qosEngine);
-                    client.fileQoSRequirementsModified(requirements);
+                    if (!useQosService) {
+                        new QoSTransitionEngine(poolmanager,
+                              poolMonitor,
+                              pnfsHandler,
+                              pinmanager)
+                              .adjustQoS(path,
+                                    targetQos, request.getRemoteHost());
+                    } else {
+                        /*
+                         *  fire and forget, does not wait for transition to complete
+                         */
+                        FileAttributes attr
+                              = pnfsHandler.getFileAttributes(path.toString(),
+                              NamespaceUtils.getRequestedAttributes(false, false,
+                                    true, false, false));
+                        FileQoSRequirements requirements = getBasicRequirements(targetQos, attr);
+                        RemoteQoSRequirementsClient client = new RemoteQoSRequirementsClient();
+                        client.setRequirementsService(qosEngine);
+                        client.fileQoSRequirementsModified(requirements);
+                    }
                     break;
                 case "pin":
                     Integer lifetime = reqPayload.optInt("lifetime");
                     if (lifetime == null) {
                         lifetime = 0;
                     }
-                    String lifetimeUnitVal = reqPayload.optString("lifetime-unit");
+                    String lifetimeUnitVal = Strings.emptyToNull(
+                          reqPayload.optString("lifetime-unit"));
                     TimeUnit lifetimeUnit = lifetimeUnitVal == null ?
                           TimeUnit.SECONDS : TimeUnit.valueOf(lifetimeUnitVal);
                     pnfsId = pnfsHandler.getPnfsIdByPath(path.toString());
@@ -531,6 +549,8 @@ public class FileResources {
         } catch (NoAttributeCacheException e) {
             throw new WebApplicationException(Response.status(409, "No such attribute")
                   .build());
+        } catch (NoRouteToCellException | InterruptedException e) {
+            throw new InternalServerErrorException(e.toString());
         } catch (UnsupportedOperationException |
               URISyntaxException |
               JSONException |
@@ -598,6 +618,11 @@ public class FileResources {
             throw new InternalServerErrorException(e);
         }
         return successfulResponse(Response.Status.OK);
+    }
+
+    @Required
+    public void setUseQosService(boolean useQosService) {
+        this.useQosService = useQosService;
     }
 
     private FileQoSRequirements getBasicRequirements(String targetQos, FileAttributes attributes) {
