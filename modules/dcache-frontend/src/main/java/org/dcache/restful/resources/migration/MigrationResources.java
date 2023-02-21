@@ -15,6 +15,7 @@ import java.util.Collections;
 import java.util.UUID;
 import javax.inject.Inject;
 import javax.inject.Named;
+import javax.json.JsonObject;
 import javax.security.auth.Subject;
 import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.BadRequestException;
@@ -31,10 +32,13 @@ import org.dcache.auth.attributes.Restrictions;
 import org.dcache.cells.CellStub;
 import org.dcache.pool.migration.PoolMigrationCopyReplicaMessage;
 import org.dcache.pool.repository.ReplicaState;
+import org.dcache.restful.resources.billing.BillingResources;
 import org.dcache.restful.util.RequestUser;
 import org.dcache.vehicles.FileAttributes;
 import org.json.JSONArray;
 import org.json.JSONObject;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
@@ -46,6 +50,8 @@ import org.springframework.stereotype.Component;
 @Api(value = "migrations", authorizations = {@Authorization("basicAuth")})
 @Path("/migrations")
 public final class MigrationResources {
+    private static final Logger LOGGER = LoggerFactory.getLogger(MigrationResources.class);
+
     @Context
     private HttpServletRequest request;
 
@@ -55,10 +61,9 @@ public final class MigrationResources {
 
     /**
      * Submit a migration copy request.
-     * Migration requestto copy all data to another
+     * Request to migrate (copy) all data from a source pool to a target pool.
      *
-     * @return response which includes a location HTTP response header with a value that is the
-     * absolute URL for the resource associated with this bulk request.
+     * @return response which will confirm the execution of the command (no output).
      */
     @POST
     @ApiOperation(value = "Submit a migration copy request. (See Pool Operator Commands 'migration copy')")
@@ -73,38 +78,84 @@ public final class MigrationResources {
     @Consumes({MediaType.APPLICATION_JSON})
     @Produces(MediaType.APPLICATION_JSON)
     public Response submitMigrationCopy(
-            @ApiParam(value = "Name of the pool to migrate from. (String)", required = true) String targetPool,
-            @ApiParam(value = "ReplicaState after the migration. (String)", required = true) String replicaStateName, // TODO: Make sure this is correct.
-            @ApiParam(value = "aTime") Long aTime,
-            @ApiParam(value = "forceSourceMode (Boolean)", required = true) boolean forceSourceMode,
-            @ApiParam(value = "metaOnly (Boolean)", required = true) boolean metaOnly,
-            @ApiParam(value = "fileAttributes via key values in an object." +
-                    "accessed - String (<n>|[<n>]..[<m>])- Only copy replicas within a given time period." +
-                    "accessLatency - ONLINE|NEARLINE - Only copy replicas with the given access latency." +
-                    "pnfsid - Array of PNFSIDs - Only copy replicas with the given PNFSIDs." +
-                    "retentionPolicy - CUSTODIAL|REPLICA|OUTPUT - Only copy replicas with the given retention policy." +
-                    "size - String (<n>|[<n>]..[<m>]) - Only copy replicas with size <n>, or a size within the given, possibly open-ended, interval." +
-                    "sticky - Array of Owners (Strings) - Only copy replicas that are sticky, if the array is not empty, then it will be restricted to the specified owners." +
-                    "storage - String - Only copy replicas with a certain storage class.",
-                    required = true) String requestPayload
-            ) {
+            @ApiParam(value = "Name of the pool to migrate from. (String)", required = true)
+            String sourcePool,
+            @ApiParam(value = "-accessed - String (<n>|[<n>]..[<m>]) - Only copy replicas within a given time period.")
+            String fileAttrAccessed,
+            @ApiParam(value = "-al - String (ONLINE | NEARLINE) - Only copy replicas with the given access latency.")
+            String fileAttrAL,
+            @ApiParam(value = "-pnfsid - Array of String (PNFSIDs) - Only copy replicas with the given PNFSIDs, must contain 1 or more PNFSIDs.")
+            JSONArray fileAttrPnfsids,
+            @ApiParam(value = "-state - String (CACHED | PRECIOUS) - Only copy replicas with the given replica state.")
+            String fileAttrRS,
+            @ApiParam(value = "-rp - String (CUSTODIAL | REPLICA | OUTPUT) - Only copy replicas with the given retention policy.")
+            String fileAttrRP,
+            @ApiParam(value = "-size - String (<n>|[<n>]..[<m>]) - Only copy replicas with size <n>, or a size within the given, possibly open-ended, interval.")
+            String fileAttrSize,
+            @ApiParam(value = "-sticky - Array of Owners (Strings) - Only copy replicas that are sticky, if the array is not empty, then it will be restricted to the specified owners.")
+            String fileAttrSticky,
+            @ApiParam(value = "-storage - String - Only copy replicas with a certain storage class.")
+            String fileAttrStorage,
+            @ApiParam(value = "-concurrency - Integer - Amount of Concurrent Transfers to be performed.")
+            Long concurrency,
+            @ApiParam(value = "-pins - String (MOVE | KEEP) - Controls how sticky flags owned by the PinManager are handled.")
+            String pins,
+            @ApiParam(value = "-smode - String (SAME | CACHED | PRECIOUS | REMOVABLE | DELETE)[+<owner>[(<lifetime>)] - " +
+                    "Update the local replica to the given mode after transfer. An optional list of sticky flags can be specified.")
+            String smode,
+            @ApiParam(value = "-smode - String (SAME | CACHED | PRECIOUS )[+<owner>[(<lifetime>)] - " +
+                    "Sets the target replica to the given mode after transfer. An optional list of sticky flags can be specified.")
+            String tmode,
+            @ApiParam(value = "-verify - Boolean - Force checksum computation when an existing target is updated.")
+            boolean verify,
+            @ApiParam(value = "-eager - Boolean - Copy replicas rather than retrying when pools with existing replicas fail to respond." )
+            boolean eager,
+            @ApiParam(value = "-exclude - Array of Pools (Strings) - Exclude Target Pools. Single character (?) and multi character (*) wildcards may be used.")
+            JSONArray excludePools,
+            @ApiParam(value = "-include - Array of Pools (Strings) - Only include the specified pools as target pools.")
+            JSONArray includePools,
+            @ApiParam(value = "-refresh - Integer - Specifies the period in seconds of when target pool information is queried from the pool manager. The default is 300 seconds.")
+            Long refresh,
+            @ApiParam(value = "-select - String (PROPORTIONAL | BEST | RANDOM) - Determines how a pool is selected from the set of target pools.")
+            String selector,
+            @ApiParam(value = "-target - String (POOL | PGROUP | LINK) - Determines the interpretation of the included pools.")
+            String target
+    ) {
+        // TODO: Add expressions (pause-when, include-when, exclude-when, stop-when) to the request.
+        // TODO: Pass the migration request as a message and not via a CLI-Message.
+        // This was a quick and dirty trick to fulfill some other projects' programmatic contracts.
+
         // First convert to JSON.
-        JSONObject jsonPayload = new JSONObject(requestPayload);
+        LOGGER.info("Source Pool {}", sourcePool);
+        LOGGER.info(fileAttrAccessed);
+        LOGGER.info(fileAttrAL);
+        LOGGER.info(fileAttrPnfsids.toString());
+        LOGGER.info(fileAttrRS);
+        LOGGER.info(fileAttrRP);
+        LOGGER.info(fileAttrSize);
+        LOGGER.info(fileAttrSticky);
+        LOGGER.info(fileAttrStorage);
+        LOGGER.info(concurrency.toString());
+        LOGGER.info(pins);
+        LOGGER.info(smode);
+        LOGGER.info(tmode);
+        LOGGER.info(String.valueOf(verify));
+        LOGGER.info(String.valueOf(eager));
+        LOGGER.info(String.valueOf(excludePools));
+        LOGGER.info(String.valueOf(includePools));
+        LOGGER.info(String.valueOf(refresh));
+        LOGGER.info(String.valueOf(selector));
+        LOGGER.info(String.valueOf(target));
 
         // Something to note here: We assume in getSubject() that you HAVE to be an Administrator!
         // Should this change, then the Restrictions must be reapplied accordingly.
         Subject subject = getSubject();
         Restriction restriction = Restrictions.none();
-        // Replica State
-        ReplicaState replicaState;
-        try {
-            replicaState = ReplicaState.valueOf(replicaStateName);
-        } catch (IllegalArgumentException iae) {
-            throw new BadRequestException("Replica state '" + replicaStateName + "' is not a valid replica state.");
-        }
 
         // Create the file attributes from the request.
         FileAttributes.Builder fileAttributesBuilder = FileAttributes.of();
+
+        JSONObject jsonPayload = new JSONObject("");
         // Handle the file attributes from the request
         {
             if (jsonPayload.has("accessed")) {
@@ -157,35 +208,10 @@ public final class MigrationResources {
         }
         FileAttributes fileAttributes = fileAttributesBuilder.build();
 
-        // We need to create the PoolMigrationCopyReplicaMessage
-        PoolMigrationCopyReplicaMessage pmcrm = new PoolMigrationCopyReplicaMessage(
-                UUID.randomUUID(),
-                targetPool,
-                fileAttributes,
-                replicaState,
-                Collections.emptyList(), //TODO: Sticky Records
-                true,
-                forceSourceMode,
-                aTime,
-                metaOnly
-        );
-
-        try {
-            pmcrm.setSubject(subject);
-
-            pmcrm = poolStub.sendAndWait(pmcrm);
-        } catch (CacheException e) {
-            throw new RuntimeException(e);
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-        } catch (NoRouteToCellException e) {
-            throw new RuntimeException(e);
-        }
-
 
         // TODO: Proper Response
         return Response.status(Response.Status.CREATED)
-                .header("request-url",pmcrm.getId())
+                .header("request-url", "7")
                 .type(MediaType.APPLICATION_JSON)
                 .build();
     }
