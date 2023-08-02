@@ -17,22 +17,19 @@
  */
 package dmg.util.command;
 
-import static com.google.common.collect.Iterables.any;
-import static com.google.common.collect.Iterables.transform;
-import static java.util.Arrays.asList;
 
-import com.google.common.base.CharMatcher;
 import com.google.common.base.Joiner;
-import com.google.common.base.Predicate;
 import com.google.common.collect.Multimap;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import org.dcache.util.Strings;
 
 /**
@@ -51,23 +48,20 @@ public abstract class TextHelpPrinter implements AnnotatedCommandHelpPrinter {
 
     private static final int WIDTH = 72;
 
-    private static final Predicate<? super Field> shouldBeDocumented =
-          new Predicate<Field>() {
-              @Override
-              public boolean apply(Field field) {
-                  Argument argument = field.getAnnotation(Argument.class);
-                  ExpandWith expandWith = field.getAnnotation(ExpandWith.class);
+    private static final java.util.function.Predicate<? super Field> shouldBeDocumented =
+          field -> {
+              Argument argument = field.getAnnotation(Argument.class);
+              ExpandWith expandWith = field.getAnnotation(ExpandWith.class);
 
-                  /* Arguments that are not required might have a default value and should thus
-                   * be included in the help output.
-                   */
-                  return argument != null && (expandWith != null || !argument.usage().isEmpty()
-                        || !argument.required());
-              }
+              /* Arguments that are not required might have a default value and should thus
+               * be included in the help output.
+               */
+              return argument != null && (expandWith != null || !argument.usage().isEmpty()
+                    || !argument.required());
           };
 
     private <T> Iterable<String> literal(T[] values) {
-        return transform(asList(values), (s) -> literal(s.toString()));
+        return Arrays.stream(values).map(s -> literal(s.toString())).collect(Collectors.toList());
     }
 
     protected String valuespec(String valuespec) {
@@ -81,7 +75,7 @@ public abstract class TextHelpPrinter implements AnnotatedCommandHelpPrinter {
                     out.append(s);
                     break;
                 default:
-                    if (CharMatcher.javaUpperCase().matchesAllOf(s)) {
+                    if (s.chars().allMatch(Character::isUpperCase)) {
                         out.append(value(s));
                     } else {
                         out.append(literal(s));
@@ -263,7 +257,7 @@ public abstract class TextHelpPrinter implements AnnotatedCommandHelpPrinter {
         writer.println();
 
         List<Field> arguments = AnnotatedCommandUtils.getArguments(clazz);
-        if (!arguments.isEmpty() && any(arguments, shouldBeDocumented)) {
+        if (!arguments.isEmpty() && arguments.stream().anyMatch(shouldBeDocumented)) {
             writer.println(heading("ARGUMENTS"));
             for (Field field : arguments) {
                 Argument argument = field.getAnnotation(Argument.class);
@@ -365,13 +359,9 @@ public abstract class TextHelpPrinter implements AnnotatedCommandHelpPrinter {
 
     private boolean hasDefaultDescription(Class<?> type, Object value) {
         if (type.isArray()) {
-            if (Array.getLength(value) == 0) {
-                return false;
-            }
+            return Array.getLength(value) != 0;
         } else if (Boolean.class.equals(type) || Boolean.TYPE.equals(type)) {
-            if (!(Boolean) value) {
-                return false;
-            }
+            return (Boolean) value;
         }
         return true;
     }
