@@ -20,15 +20,14 @@ package org.dcache.services.login;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
+import com.github.benmanes.caffeine.cache.CacheLoader;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.google.common.base.Throwables;
-import com.google.common.cache.CacheBuilder;
-import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
-import com.google.common.util.concurrent.UncheckedExecutionException;
 import diskCacheV111.util.CacheException;
 import java.security.Principal;
 import java.util.Optional;
-import java.util.concurrent.ExecutionException;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import javax.security.auth.Subject;
 import org.dcache.auth.GidPrincipal;
@@ -54,10 +53,10 @@ public class IdentityResolverFactory {
 
     private final LoginStrategy loginStrategy;
 
-    private final LoadingCache<Long, Optional<String>> uidToName = CacheBuilder.newBuilder()
+    private final LoadingCache<Long, Optional<String>> uidToName = Caffeine.newBuilder()
           .maximumSize(1000)
           .expireAfterWrite(1, TimeUnit.MINUTES)
-          .build(new CacheLoader<Long, Optional<String>>() {
+          .build(new CacheLoader<>() {
               @Override
               public Optional<String> load(Long uid) throws CacheException {
                   for (Principal p : loginStrategy.reverseMap(new UidPrincipal(uid))) {
@@ -69,10 +68,10 @@ public class IdentityResolverFactory {
               }
           });
 
-    private final LoadingCache<Long, Optional<String>> gidToName = CacheBuilder.newBuilder()
+    private final LoadingCache<Long, Optional<String>> gidToName = Caffeine.newBuilder()
           .maximumSize(1000)
           .expireAfterWrite(1, TimeUnit.MINUTES)
-          .build(new CacheLoader<Long, Optional<String>>() {
+          .build(new CacheLoader<>() {
               @Override
               public Optional<String> load(Long gid) throws CacheException {
                   for (Principal p : loginStrategy.reverseMap(new GidPrincipal(gid, false))) {
@@ -195,14 +194,11 @@ public class IdentityResolverFactory {
             if (!name.isPresent()) {
                 try {
                     name = uidToName.get(uid);
-                } catch (ExecutionException e) {
+                } catch (CompletionException e) {
                     Throwable t = e.getCause();
                     Throwables.throwIfUnchecked(t);
                     LOGGER.warn("Failed to obtain username for uid {}: {}", uid,
                           e.getMessage());
-                } catch (UncheckedExecutionException e) {
-                    Throwables.throwIfUnchecked(e.getCause());
-                    throw e;
                 }
             }
 
@@ -215,14 +211,11 @@ public class IdentityResolverFactory {
             if (!name.isPresent()) {
                 try {
                     name = gidToName.get(gid);
-                } catch (ExecutionException e) {
+                } catch (CompletionException e) {
                     Throwable t = e.getCause();
                     Throwables.throwIfUnchecked(t);
                     LOGGER.warn("Failed to obtain groupname for gid {}: {}", gid,
                           e.getMessage());
-                } catch (UncheckedExecutionException e) {
-                    Throwables.throwIfUnchecked(e.getCause());
-                    throw e;
                 }
             }
 

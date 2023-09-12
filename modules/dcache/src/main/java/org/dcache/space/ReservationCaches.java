@@ -69,11 +69,9 @@ import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
-import com.google.common.cache.CacheBuilder;
-import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.SettableFuture;
+import com.github.benmanes.caffeine.cache.CacheLoader;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.LoadingCache;
 import diskCacheV111.services.space.Space;
 import diskCacheV111.services.space.message.GetSpaceMetaData;
 import diskCacheV111.services.space.message.GetSpaceTokens;
@@ -89,6 +87,7 @@ import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import javax.security.auth.Subject;
 import org.dcache.cells.AbstractMessageCallback;
@@ -153,12 +152,12 @@ public class ReservationCaches {
      */
     public static LoadingCache<GetSpaceTokensKey, long[]> buildOwnerDescriptionLookupCache(
           CellStub spaceManager, Executor executor) {
-        return CacheBuilder.newBuilder()
+        return Caffeine.newBuilder()
               .maximumSize(1000)
               .expireAfterWrite(30, SECONDS)
               .refreshAfterWrite(10, SECONDS)
               .recordStats()
-              .build(new CacheLoader<GetSpaceTokensKey, long[]>() {
+              .build(new CacheLoader<>() {
                   @Override
                   public long[] load(GetSpaceTokensKey key) throws Exception {
                       try {
@@ -183,22 +182,23 @@ public class ReservationCaches {
                   }
 
                   @Override
-                  public ListenableFuture<long[]> reload(GetSpaceTokensKey key, long[] oldValue)
-                        throws Exception {
-                      final SettableFuture<long[]> future = SettableFuture.create();
+                  public CompletableFuture<long[]> asyncReload(GetSpaceTokensKey key,
+                        long[] oldValue, Executor ignored) {
+                      final CompletableFuture<long[]> future = CompletableFuture.completedFuture(
+                            null);
                       CellStub.addCallback(
                             spaceManager.send(createRequest(key)),
-                            new AbstractMessageCallback<GetSpaceTokens>() {
+                            new AbstractMessageCallback<>() {
                                 @Override
                                 public void success(GetSpaceTokens message) {
-                                    future.set(message.getSpaceTokens());
+                                    future.obtrudeValue(message.getSpaceTokens());
                                 }
 
                                 @Override
                                 public void failure(int rc, Object error) {
                                     CacheException exception = CacheExceptionFactory.exceptionOf(
                                           rc, Objects.toString(error, null));
-                                    future.setException(exception);
+                                    future.obtrudeException(exception);
                                 }
                             }, executor);
                       return future;
@@ -211,13 +211,13 @@ public class ReservationCaches {
      */
     public static LoadingCache<String, Optional<Space>> buildSpaceLookupCache(CellStub spaceManager,
           Executor executor) {
-        return CacheBuilder.newBuilder()
+        return Caffeine.newBuilder()
               .maximumSize(1000)
               .expireAfterWrite(10, MINUTES)
               .refreshAfterWrite(30, SECONDS)
               .recordStats()
               .build(
-                    new CacheLoader<String, Optional<Space>>() {
+                    new CacheLoader<>() {
                         @Override
                         public Optional<Space> load(String token)
                               throws CacheException, NoRouteToCellException, InterruptedException {
@@ -228,22 +228,24 @@ public class ReservationCaches {
                         }
 
                         @Override
-                        public ListenableFuture<Optional<Space>> reload(String token,
-                              Optional<Space> oldValue) {
-                            final SettableFuture<Optional<Space>> future = SettableFuture.create();
+                        public CompletableFuture<Optional<Space>> asyncReload(String token,
+                              Optional<Space> oldValue, Executor ignored) {
+                            final CompletableFuture<Optional<Space>> future = CompletableFuture.completedFuture(
+                                  null);
                             CellStub.addCallback(
                                   spaceManager.send(new GetSpaceMetaData(token)),
-                                  new AbstractMessageCallback<GetSpaceMetaData>() {
+                                  new AbstractMessageCallback<>() {
                                       @Override
                                       public void success(GetSpaceMetaData message) {
-                                          future.set(Optional.ofNullable(message.getSpaces()[0]));
+                                          future.obtrudeValue(
+                                                Optional.ofNullable(message.getSpaces()[0]));
                                       }
 
                                       @Override
                                       public void failure(int rc, Object error) {
                                           CacheException exception = CacheExceptionFactory.exceptionOf(
                                                 rc, Objects.toString(error, null));
-                                          future.setException(exception);
+                                          future.obtrudeException(exception);
                                       }
                                   }, executor);
                             return future;
@@ -261,37 +263,38 @@ public class ReservationCaches {
      */
     public static LoadingCache<FsPath, java.util.Optional<String>> buildWriteTokenLookupCache(
           PnfsHandler pnfs, Executor executor) {
-        return CacheBuilder.newBuilder()
+        return Caffeine.newBuilder()
               .maximumSize(1000)
               .expireAfterWrite(10, MINUTES)
               .refreshAfterWrite(5, MINUTES)
               .recordStats()
-              .build(new CacheLoader<FsPath, java.util.Optional<String>>() {
+              .build(new CacheLoader<>() {
                   @Override
                   public java.util.Optional<String> load(FsPath path)
-                        throws CacheException, NoRouteToCellException, InterruptedException {
+                        throws CacheException {
                       return writeToken(
                             pnfs.getFileAttributes(path, EnumSet.of(FileAttribute.STORAGEINFO)));
                   }
 
                   @Override
-                  public ListenableFuture<java.util.Optional<String>> reload(FsPath path,
-                        java.util.Optional<String> old) {
+                  public CompletableFuture<java.util.Optional<String>> asyncReload(FsPath path,
+                        java.util.Optional<String> old, Executor ignored) {
                       PnfsGetFileAttributes message = new PnfsGetFileAttributes(path.toString(),
                             EnumSet.of(FileAttribute.STORAGEINFO));
-                      SettableFuture<java.util.Optional<String>> future = SettableFuture.create();
+                      final CompletableFuture<Optional<String>> future = CompletableFuture.completedFuture(
+                            null);
                       CellStub.addCallback(pnfs.requestAsync(message),
                             new AbstractMessageCallback<PnfsGetFileAttributes>() {
                                 @Override
                                 public void success(PnfsGetFileAttributes message) {
-                                    future.set(writeToken(message.getFileAttributes()));
+                                    future.obtrudeValue(writeToken(message.getFileAttributes()));
                                 }
 
                                 @Override
                                 public void failure(int rc, Object error) {
                                     CacheException exception = CacheExceptionFactory.exceptionOf(
                                           rc, Objects.toString(error, null));
-                                    future.setException(exception);
+                                    future.obtrudeException(exception);
                                 }
                             }, executor);
                       return future;

@@ -59,8 +59,8 @@ documents or software obtained from this server.
  */
 package diskCacheV111.poolManager;
 
-import com.google.common.cache.Cache;
-import com.google.common.cache.CacheBuilder;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import diskCacheV111.vehicles.RestoreHandlerInfo;
 import dmg.cells.nucleus.CellMessageReceiver;
 import java.util.List;
@@ -81,7 +81,7 @@ public class RestoreRequestsReceiver implements CellMessageReceiver {
     private TimeUnit lifetimeUnit = TimeUnit.HOURS;
 
     public void initialize() {
-        restores = CacheBuilder.newBuilder()
+        restores = Caffeine.newBuilder()
               .expireAfterWrite(lifetime, lifetimeUnit)
               .build();
     }
