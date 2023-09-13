@@ -20,14 +20,14 @@ package org.dcache.chimera.nfsv41.door;
 import static com.google.common.base.Throwables.getRootCause;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
-import com.google.common.cache.CacheBuilder;
-import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
+import com.github.benmanes.caffeine.cache.CacheLoader;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.LoadingCache;
 import java.io.IOException;
 import java.security.Principal;
 import java.security.PrivilegedAction;
 import java.util.Optional;
-import java.util.concurrent.ExecutionException;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import javax.security.auth.Subject;
@@ -110,7 +110,7 @@ public class DoorOperationFactory extends MDSOperationExecutor {
         _proxyIoFactory = proxyIoFactory;
         _vfs = fs;
         _jdbcFs = jdbcFs;
-        _pathCache = CacheBuilder.newBuilder()
+        _pathCache = Caffeine.newBuilder()
               .maximumSize(512)
               .expireAfterWrite(30, TimeUnit.SECONDS)
               .softValues()
@@ -119,17 +119,17 @@ public class DoorOperationFactory extends MDSOperationExecutor {
         _accessLogMode = accessLogMode;
 
         if (accessLogMode == AccessLogMode.NONE) {
-            createOp = (a) -> super.getOperation(a);
-            openOp = (a) -> super.getOperation(a);
-            removeOp = (a) -> super.getOperation(a);
-            renameOp = (a) -> super.getOperation(a);
-            setattrOp = (a) -> super.getOperation(a);
+            createOp = super::getOperation;
+            openOp = super::getOperation;
+            removeOp = super::getOperation;
+            renameOp = super::getOperation;
+            setattrOp = super::getOperation;
         } else {
-            createOp = (a) -> new OpCreate(a);
-            openOp = (a) -> new OpOpen(a);
-            removeOp = (a) -> new OpRemove(a);
-            renameOp = (a) -> new OpRename(a);
-            setattrOp = (a) -> new OpSetattr(a);
+            createOp = OpCreate::new;
+            openOp = OpOpen::new;
+            removeOp = OpRemove::new;
+            renameOp = OpRename::new;
+            setattrOp = OpSetattr::new;
         }
 
         switch (_accessLogMode) {
@@ -137,7 +137,7 @@ public class DoorOperationFactory extends MDSOperationExecutor {
                 _inode2path = i -> {
                     try {
                         return _pathCache.get(i);
-                    } catch (ExecutionException e) {
+                    } catch (CompletionException e) {
                         Throwable t = getRootCause(e);
                         LOG.error("Failed to get inode path {} : {}", i, t.getMessage());
                         return "inode:" + i;
@@ -157,16 +157,13 @@ public class DoorOperationFactory extends MDSOperationExecutor {
         }
 
         if (subjectMapper.isPresent()) {
-            CacheLoader<Principal, Subject> loader = new CacheLoader<Principal, Subject>() {
-                @Override
-                public Subject load(Principal key) throws Exception {
-                    Subject in = new Subject();
-                    in.getPrincipals().add(key);
-                    return subjectMapper.get().login(in);
-                }
+            CacheLoader<Principal, Subject> loader = key -> {
+                Subject in = new Subject();
+                in.getPrincipals().add(key);
+                return subjectMapper.get().login(in);
             };
 
-            _subjectCache = Optional.of(CacheBuilder.newBuilder()
+            _subjectCache = Optional.of(Caffeine.newBuilder()
                   .maximumSize(2048)
                   .expireAfterWrite(10, TimeUnit.MINUTES)
                   .build(loader));
@@ -223,7 +220,7 @@ public class DoorOperationFactory extends MDSOperationExecutor {
                                       if (gids.length >= 16) {
                                           long uid = UnixSubjects.getUid(subject);
                                           UidPrincipal uidPrincipal = new UidPrincipal(uid);
-                                          subject = _subjectCache.get().getUnchecked(uidPrincipal);
+                                          subject = _subjectCache.get().get(uidPrincipal);
                                           context.getSubject().getPrincipals()
                                                 .addAll(subject.getPrincipals());
                                       }
@@ -459,7 +456,7 @@ public class DoorOperationFactory extends MDSOperationExecutor {
         }
     }
 
-    private class ParentPathLoader extends CacheLoader<FsInode, String> {
+    private class ParentPathLoader implements CacheLoader<FsInode, String> {
 
         @Override
         public String load(FsInode inode) throws Exception {

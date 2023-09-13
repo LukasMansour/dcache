@@ -81,14 +81,14 @@ import static org.dcache.namespace.FileAttribute.TYPE;
 import static org.dcache.srm.SRMInvalidPathException.checkValidPath;
 import static org.dcache.util.NetworkUtils.isInetAddress;
 
+import com.github.benmanes.caffeine.cache.CacheLoader;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.google.common.base.CharMatcher;
 import com.google.common.base.Function;
 import com.google.common.base.Joiner;
 import com.google.common.base.Predicate;
 import com.google.common.base.Throwables;
-import com.google.common.cache.CacheBuilder;
-import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Ordering;
@@ -162,6 +162,7 @@ import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
@@ -256,7 +257,7 @@ public final class Storage
     private static final Set<String> FTP_URL_SCHEMATA = Set.of("ftp", "gsiftp", "gkftp");
 
     private static final LoadingCache<InetAddress, String> GET_HOST_BY_ADDR_CACHE =
-          CacheBuilder.newBuilder()
+          Caffeine.newBuilder()
                 .expireAfterWrite(10, MINUTES)
                 .recordStats()
                 .build(new GetHostByAddressCacheLoader());
@@ -940,7 +941,7 @@ public final class Storage
                 resolvedHost = GET_HOST_BY_ADDR_CACHE.get(address);
             }
             return resolvedHost;
-        } catch (ExecutionException e) {
+        } catch (CompletionException e) {
             Throwable cause = e.getCause();
             throw new SRMInternalErrorException("Failed to resolve door: " + cause, cause);
         }
@@ -1032,7 +1033,7 @@ public final class Storage
                               "Space associated with the space token " + spaceToken
                                     + " is not enough to hold SURL."));
                     }
-                } catch (ExecutionException e) {
+                } catch (CompletionException e) {
                     return immediateFailedFuture(new SRMException(
                           "Failure while querying space reservation: " + e.getCause()
                                 .getMessage()));
@@ -2231,7 +2232,7 @@ public final class Storage
                 _log.trace("srmGetSpaceTokens returns: {}", Arrays.toString(tokens));
             }
             return Arrays.stream(tokens).mapToObj(Long::toString).toArray(String[]::new);
-        } catch (ExecutionException e) {
+        } catch (CompletionException e) {
             Throwable cause = e.getCause();
             Throwables.throwIfInstanceOf(cause, SRMException.class);
             Throwables.throwIfUnchecked(cause);
@@ -2340,7 +2341,7 @@ public final class Storage
         return dcacheUser;
     }
 
-    private static class GetHostByAddressCacheLoader extends CacheLoader<InetAddress, String> {
+    private static class GetHostByAddressCacheLoader implements CacheLoader<InetAddress, String> {
 
         @Override
         public String load(InetAddress address) throws Exception {

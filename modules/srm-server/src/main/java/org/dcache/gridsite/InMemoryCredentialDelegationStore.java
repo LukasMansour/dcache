@@ -20,9 +20,9 @@ package org.dcache.gridsite;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.dcache.gridsite.Utilities.assertThat;
 
-import com.google.common.cache.Cache;
-import com.google.common.cache.CacheBuilder;
-import com.google.common.cache.RemovalListener;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.RemovalListener;
 import org.dcache.delegation.gridsite2.DelegationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,19 +48,18 @@ public class InMemoryCredentialDelegationStore implements
           InMemoryCredentialDelegationStore.class);
 
     private final RemovalListener<DelegationIdentity, CredentialDelegation>
-          LOG_REMOVALS = notification -> {
-        DelegationIdentity identity = notification.getKey();
-        switch (notification.getCause()) {
-            case EXPIRED:
-                LOGGER.debug("removing delegation from {}: client took" +
-                      " too long to reply", identity.getDn());
-                break;
-            case SIZE:
-                LOGGER.debug("removing delegation from {}: too many" +
-                      " on-going delegations", identity.getDn());
-                break;
-        }
-    };
+          LOG_REMOVALS = (key, value, cause) -> {
+              switch (cause) {
+                  case EXPIRED:
+                      LOGGER.debug("removing delegation from {}: client took" +
+                            " too long to reply", key.getDn());
+                      break;
+                  case SIZE:
+                      LOGGER.debug("removing delegation from {}: too many" +
+                            " on-going delegations", key.getDn());
+                      break;
+              }
+          };
 
     private Cache<DelegationIdentity, CredentialDelegation> _storage;
     private long _expireAfter;
@@ -86,7 +85,7 @@ public class InMemoryCredentialDelegationStore implements
 
 
     public void start() {
-        _storage = CacheBuilder.newBuilder().
+        _storage = Caffeine.newBuilder().
               maximumSize(_maxOngoing).
               expireAfterWrite(_expireAfter, MILLISECONDS).
               removalListener(LOG_REMOVALS).

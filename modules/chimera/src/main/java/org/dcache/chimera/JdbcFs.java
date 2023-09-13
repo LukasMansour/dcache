@@ -26,12 +26,15 @@ import static org.dcache.chimera.FileSystemProvider.StatCacheOption.STAT;
 import static org.dcache.util.ByteUnit.EiB;
 import static org.dcache.util.SqlHelper.tryToClose;
 
+import com.github.benmanes.caffeine.cache.AsyncCacheLoader;
+import com.github.benmanes.caffeine.cache.AsyncLoadingCache;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.CacheLoader;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.google.common.base.Throwables;
-import com.google.common.cache.Cache;
-import com.google.common.cache.CacheBuilder;
-import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
 import com.google.common.io.ByteSource;
+import com.google.common.util.concurrent.ListenableFutureTask;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import diskCacheV111.util.RetentionPolicy;
 import java.io.File;
@@ -45,6 +48,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
@@ -53,6 +58,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
 import org.apache.curator.framework.recipes.leader.LeaderLatchListener;
+import org.checkerframework.checker.nullness.qual.Nullable;
 import org.dcache.acl.ACE;
 import org.dcache.acl.enums.RsType;
 import org.dcache.chimera.posix.Stat;
@@ -128,29 +134,41 @@ public class JdbcFs implements FileSystemProvider, LeaderLatchListener {
           );
 
     private final LoadingCache<Object, FsStat> _fsStatCache
-          = CacheBuilder.newBuilder()
+          = Caffeine.newBuilder()
           .refreshAfterWrite(100, TimeUnit.MILLISECONDS)
+          .executor(_fsStatUpdateExecutor)
           .build(
-                CacheLoader.asyncReloading(new CacheLoader<Object, FsStat>() {
+                new CacheLoader<>() {
 
-                                               @Override
-                                               public FsStat load(Object k) throws Exception {
-                                                   return JdbcFs.this.getFsStat0();
-                                               }
-                                           }
-                      , _fsStatUpdateExecutor));
+                    @Override
+                    public FsStat load(Object k) throws Exception {
+                        return JdbcFs.this.getFsStat0();
+                    }
+
+                    @Override
+                    public @Nullable FsStat reload(Object key, FsStat oldValue) throws Exception {
+                        return asyncReload(key, oldValue, _fsStatUpdateExecutor).get();
+                    }
+
+                    @Override
+                    public CompletableFuture<? extends FsStat> asyncReload(Object key,
+                          FsStat oldValue, Executor executor) throws Exception {
+                        return CacheLoader.super.asyncReload(key, oldValue, executor);
+                    }
+                }
+          );
 
     /* The PNFS ID to inode number mapping will never change while dCache is running.
      */
     protected final Cache<String, Long> _inoCache =
-          CacheBuilder.newBuilder()
+          Caffeine.newBuilder()
                 .maximumSize(100000)
                 .build();
 
     /* The inode number to PNFS ID mapping will never change while dCache is running.
      */
     protected final Cache<Long, String> _idCache =
-          CacheBuilder.newBuilder()
+          Caffeine.newBuilder()
                 .maximumSize(100000)
                 .build();
 
@@ -725,18 +743,20 @@ public class JdbcFs implements FileSystemProvider, LeaderLatchListener {
     @Override
     public String inode2id(FsInode inode) throws ChimeraFsException {
         try {
-            return _idCache.get(inode.ino(), () -> {
+            return _idCache.get(inode.ino(), (key) -> {
                 String id = _sqlDriver.getId(inode);
                 if (id == null) {
-                    throw FileNotFoundChimeraFsException.of(inode);
+                    throw new RuntimeException(FileNotFoundChimeraFsException.of(inode));
                 }
                 return id;
             });
-        } catch (ExecutionException e) {
-            Throwables.throwIfInstanceOf(e.getCause(), ChimeraFsException.class);
-            Throwables.throwIfInstanceOf(e.getCause(), DataAccessException.class);
-            Throwables.throwIfUnchecked(e.getCause());
-            throw new RuntimeException(e.getCause());
+        } catch (RuntimeException e) {
+            if (e.getCause() != null) {
+                Throwables.throwIfInstanceOf(e.getCause(), ChimeraFsException.class);
+                Throwables.throwIfInstanceOf(e.getCause(), DataAccessException.class);
+                Throwables.throwIfUnchecked(e.getCause());
+            }
+            throw e;
         }
     }
 
@@ -744,18 +764,21 @@ public class JdbcFs implements FileSystemProvider, LeaderLatchListener {
     public FsInode id2inode(String id, StatCacheOption option) throws ChimeraFsException {
         if (option == NO_STAT) {
             try {
-                return new FsInode(this, _inoCache.get(id, () -> {
+                return new FsInode(this, _inoCache.get(id, (key) -> {
                     Long ino = _sqlDriver.getInumber(id);
                     if (ino == null) {
-                        throw FileNotFoundChimeraFsException.ofPnfsId(id);
+                        throw new RuntimeException(FileNotFoundChimeraFsException.ofPnfsId(id));
                     }
                     return ino;
                 }));
-            } catch (ExecutionException e) {
-                Throwables.throwIfInstanceOf(e.getCause(), ChimeraFsException.class);
-                Throwables.throwIfInstanceOf(e.getCause(), DataAccessException.class);
-                Throwables.throwIfUnchecked(e.getCause());
-                throw new RuntimeException(e.getCause());
+            } catch (RuntimeException e) {
+                if (e.getCause() != null) {
+                    Throwables.throwIfInstanceOf(e.getCause(), ChimeraFsException.class);
+                    Throwables.throwIfInstanceOf(e.getCause(), DataAccessException.class);
+                    Throwables.throwIfUnchecked(e.getCause());
+                    throw new RuntimeException(e.getCause());
+                }
+                throw e;
             }
         } else {
             Stat stat = _sqlDriver.stat(id);
@@ -1415,7 +1438,7 @@ public class JdbcFs implements FileSystemProvider, LeaderLatchListener {
     public FsStat getFsStat() throws ChimeraFsException {
         try {
             return _fsStatCache.get(DUMMY_KEY);
-        } catch (ExecutionException e) {
+        } catch (CompletionException e) {
             Throwable t = e.getCause();
             Throwables.propagateIfPossible(t, ChimeraFsException.class);
             throw new ChimeraFsException(t.getMessage(), t);
